@@ -1,0 +1,30 @@
+{
+  "name": "voice-ai-react",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "npm-run-all --parallel --print-label --print-name dev:client dev:server",
+    "dev:client": "vite",
+    "dev:server": "node server/server.js",
+    "start": "node server/server.js",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@livekit/components-react": "^2.9.19",
+    "@livekit/components-styles": "^1.2.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "livekit-client": "^2.17.0",
+    "livekit-server-sdk": "^2.15.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ws": "^8.17.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.2",
+    "npm-run-all": "^4.1.5",
+    "vite": "^5.3.1"
+  }
+}
