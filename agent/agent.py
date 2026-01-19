@@ -77,6 +77,7 @@ class SessionData:
             "llm_input_tokens": 0,
             "llm_output_tokens": 0
         }
+        self.summary_sent = False
         
 session_data = SessionData()
 
@@ -649,16 +650,16 @@ Today's date is {datetime.now().strftime("%Y-%m-%d")}.
 
     # Summary generator function
     async def generate_final_summary():
+        if session_data.summary_sent:
+            return
+        
+        session_data.summary_sent = True
         try:
             logger.info("📊 Generating final summary...")
             summary_json = await end_conversation("yes")
             summary_data = json.loads(summary_json)
             await broadcast(summary_data)
             logger.info("✅ Final summary broadcasted")
-            # Give a small delay to ensure broadcast finishes before stopping
-            await asyncio.sleep(1)
-            # Signal the session to stop if it hasn't already
-            # This will trigger agent_stopped which we should handle carefully to avoid double summary
         except Exception as e:
             logger.error(f"❌ Failed to generate end summary: {e}")
 
@@ -668,8 +669,9 @@ Today's date is {datetime.now().strftime("%Y-%m-%d")}.
         try:
             payload = json.loads(data.decode())
             if payload.get("action") == "end_session":
-                logger.info("🛑 End session signal received")
-                asyncio.create_task(generate_final_summary())
+                logger.info("🛑 End session signal received - stopping bot")
+                # Immediately stop the voice session to silence the bot
+                session.stop()
         except:
             pass
 
@@ -731,9 +733,8 @@ Today's date is {datetime.now().strftime("%Y-%m-%d")}.
     # Session End Handler - Auto-generate summary
     # -------------------------
     def on_agent_stopped():
-        """When session ends, check if summary was already generated"""
-        # We don't want to double-generate if end_conversation was already called
-        if not any(t.get("tool") == "end_conversation" for t in session_data.full_transcript):
+        """When session ends, generate summary if not already sent"""
+        if not session_data.summary_sent:
             asyncio.create_task(generate_final_summary())
 
     session.on("agent_stopped", on_agent_stopped)
