@@ -143,8 +143,6 @@ function SessionView({ onStop }) {
   const [transcripts, setTranscripts] = useState([]);
   const [sessionStart] = useState(Date.now());
   const [waitingForSummary, setWaitingForSummary] = useState(false);
-  const [reportData, setReportData] = useState(null);
-  const [isSessionEnded, setIsSessionEnded] = useState(false);
 
   // Capture actual transcripts from room events
   useEffect(() => {
@@ -217,7 +215,7 @@ function SessionView({ onStop }) {
           if (data.tool === "end_conversation" && data.status === "success") {
             setWaitingForSummary(false);
             if (window.summaryFallbackTimer) clearTimeout(window.summaryFallbackTimer);
-            setReportData(data); // Store for manual viewing
+            onStop(data); // Immediately show the report
           }
         }
       } catch (e) { }
@@ -237,7 +235,6 @@ function SessionView({ onStop }) {
     if (!room) return;
 
     setWaitingForSummary(true);
-    setIsSessionEnded(true);
     console.log('⏹ Requesting session end from agent...');
 
     try {
@@ -248,25 +245,22 @@ function SessionView({ onStop }) {
         reliable: true
       });
 
-      // Set a fallback timer in case the agent summary takes too long (> 10s)
+      // Set a fallback timer in case the agent summary takes too long
       window.summaryFallbackTimer = setTimeout(() => {
-        if (!reportData) {
-          console.warn('⚠️ Summary timed out, generating local report...');
-          setWaitingForSummary(false);
+        setWaitingForSummary(false);
 
-          const duration = Math.floor((Date.now() - sessionStart) / 1000);
-          setReportData({
-            tool: "end_conversation",
-            status: "success",
-            data: {
-              user: userInfo || { phone: null, name: null },
-              session: { duration_seconds: duration },
-              appointments_booked: appointments.filter(a => a.status === "confirmed"),
-              transcript: transcripts,
-            },
-            message: "Session ended (local fallback)"
-          });
-        }
+        const duration = Math.floor((Date.now() - sessionStart) / 1000);
+        onStop({
+          tool: "end_conversation",
+          status: "success",
+          data: {
+            user: userInfo || { phone: null, name: null },
+            session: { duration_seconds: duration },
+            appointments_booked: appointments.filter(a => a.status === "confirmed"),
+            transcript: transcripts,
+          },
+          message: "Session ended (fallback)"
+        });
       }, 10000);
     } catch (e) {
       console.error('Failed to send end signal:', e);
@@ -308,36 +302,24 @@ function SessionView({ onStop }) {
             window.summaryFallbackTimer = null;
           }
           setWaitingForSummary(false);
-          console.log('✅ Received agent summary');
-          setReportData(data); // Store for manual viewing
+          console.log('✅ Received agent summary - showing report');
+          onStop(data); // Immediately show the report
         }
       }
     } catch (e) {
       // Not a JSON tool result, ignore
     }
-  }, []);
+  }, [onStop]);
 
   return (
     <>
       <div className="card">
         <div className="controls-grid">
           <div className="btn-group">
-            {!isSessionEnded ? (
-              <button id="micBtn" className="danger" onClick={handleEndSession}>
-                <span id="micIcon">⏹</span>
-                <span id="micText">End Session</span>
-              </button>
-            ) : reportData ? (
-              <button id="viewReportBtn" className="success-btn" onClick={() => onStop(reportData)}>
-                <span id="reportIcon">📊</span>
-                <span id="reportText">View Summary & Cost</span>
-              </button>
-            ) : (
-              <button id="micBtn" disabled className="waiting">
-                <span id="micIcon">⏳</span>
-                <span id="micText">Generating Report...</span>
-              </button>
-            )}
+            <button id="micBtn" className="danger" onClick={handleEndSession} disabled={waitingForSummary}>
+              <span id="micIcon">{waitingForSummary ? "⏳" : "⏹"}</span>
+              <span id="micText">{waitingForSummary ? "Generating Report..." : "End Session"}</span>
+            </button>
           </div>
           <div className="status-indicator">
             <div className={`pulse-dot ${state === 'speaking' ? 'active' : ''}`}></div>
