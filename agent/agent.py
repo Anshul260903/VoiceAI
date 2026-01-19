@@ -506,23 +506,21 @@ async def end_conversation(
         "summary_text": summary_text
     }
 
-        try:
-            # We'll use a safest approach: insert only core fields that definitely exist.
-            # 'appointments_booked' and 'preferences' columns seem to be missing in the schema, causing PGRST204.
-            # We'll skip them for now to ensure the summary text is saved.
-            insert_data = {
-                "user_phone": session_data.user_phone,
-                "duration_seconds": duration,
-                "transcript": session_data.full_transcript, # JSONB often maps fine
-                "summary_text": summary_text
-            }
-            
-            supabase.table("call_summaries").insert(insert_data).execute()
-            logger.info(f"💾 Call summary saved to DB")
-        except Exception as e:
-            logger.error(f"❌ Failed to save summary to DB: {e}")
+    try:
+        # We'll use a safest approach: insert only core fields that definitely exist.
+        # 'appointments_booked' and 'preferences' columns seem to be missing in the schema, causing PGRST204.
+        # We'll skip them for now to ensure the summary text is saved.
+        insert_data = {
+            "user_phone": session_data.user_phone,
+            "duration_seconds": duration,
+            "transcript": session_data.full_transcript, # JSONB often maps fine
+            "summary_text": summary_text
+        }
+        
+        supabase.table("call_summaries").insert(insert_data).execute()
+        logger.info(f"💾 Call summary saved to DB")
     except Exception as e:
-        logger.error(f"❌ Failed to save summary: {e}")
+        logger.error(f"❌ Failed to save summary to DB: {e}")
     
     return json.dumps({
         "tool": "end_conversation",
