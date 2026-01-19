@@ -17,6 +17,17 @@ console.log("🔑 LiveKit credentials configured:", !!process.env.LIVEKIT_API_KE
 const app = express();
 const server = createServer(app);
 
+// CORS middleware - Allow Vercel frontend to access Railway backend
+app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*"); // Allow all origins (or specify your Vercel URL)
+    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    if (req.method === "OPTIONS") {
+        return res.sendStatus(200);
+    }
+    next();
+});
+
 // Serve built frontend when available (vite build -> dist)
 app.use(express.static(path.join(__dirname, "..", "dist")));
 app.use(express.json({ limit: "5mb" }));

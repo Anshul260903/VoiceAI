@@ -43,13 +43,16 @@ export default function App() {
   const [error, setError] = useState("");
   const [summary, setSummary] = useState(null);
 
+  // Backend URL from environment variable (for Vercel deployment)
+  const SERVER_URL = import.meta.env.VITE_SERVER_URL || "";
+
   const startSession = async () => {
     try {
       setError("");
       setSummary(null);
       const roomName = `room-${Date.now()}`;
       const resp = await fetch(
-        `/getToken?roomName=${roomName}&identity=user-${Math.floor(
+        `${SERVER_URL}/getToken?roomName=${roomName}&identity=user-${Math.floor(
           Math.random() * 1000
         )}`
       );
@@ -381,8 +384,9 @@ function SummaryView({ summary, onClose, onNewSession }) {
 
   const generateAISummary = async () => {
     setLoadingAI(true);
+    const SERVER_URL = import.meta.env.VITE_SERVER_URL || "";
     try {
-      const resp = await fetch("/generateSummary", {
+      const resp = await fetch(`${SERVER_URL}/generateSummary`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ transcript: transcripts })
