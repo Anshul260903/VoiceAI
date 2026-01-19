@@ -44,7 +44,8 @@ export default function App() {
   const [summary, setSummary] = useState(null);
 
   // Backend URL from environment variable (for Vercel deployment)
-  const SERVER_URL = import.meta.env.VITE_SERVER_URL || "";
+  const rawURL = import.meta.env.VITE_SERVER_URL || "";
+  const SERVER_URL = rawURL && !rawURL.startsWith("http") ? `https://${rawURL}` : rawURL;
 
   const startSession = async () => {
     try {
@@ -384,7 +385,8 @@ function SummaryView({ summary, onClose, onNewSession }) {
 
   const generateAISummary = async () => {
     setLoadingAI(true);
-    const SERVER_URL = import.meta.env.VITE_SERVER_URL || "";
+    const rawURL = import.meta.env.VITE_SERVER_URL || "";
+    const SERVER_URL = rawURL && !rawURL.startsWith("http") ? `https://${rawURL}` : rawURL;
     try {
       const resp = await fetch(`${SERVER_URL}/generateSummary`, {
         method: "POST",
