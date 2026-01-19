@@ -669,9 +669,10 @@ Today's date is {datetime.now().strftime("%Y-%m-%d")}.
         try:
             payload = json.loads(data.decode())
             if payload.get("action") == "end_session":
-                logger.info("🛑 End session signal received - stopping bot")
+                logger.info("🛑 End session signal received - terminating session")
                 # Immediately stop the voice session to silence the bot
-                session.stop()
+                # Use thread-safe loop to ensure it fires instantly
+                ctx.loop.call_soon_threadsafe(session.stop)
         except:
             pass
 

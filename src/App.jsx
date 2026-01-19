@@ -244,7 +244,7 @@ function SessionView({ onStop }) {
       // Send signal to agent via data channel
       const encoder = new TextEncoder();
       const payload = JSON.stringify({ action: "end_session" });
-      await room.local_participant.publishData(encoder.encode(payload), {
+      await room.localParticipant.publishData(encoder.encode(payload), {
         reliable: true
       });
 
