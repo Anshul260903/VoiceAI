@@ -35,6 +35,9 @@ const TOOL_LABELS = {
 };
 
 export default function App() {
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    return localStorage.getItem("is_auth") === "true";
+  });
   const [url, setURL] = useState(
     import.meta.env.VITE_LIVEKIT_URL || "wss://voice-ai-eon55hwv.livekit.cloud"
   );
@@ -46,6 +49,17 @@ export default function App() {
   // Backend URL from environment variable (for Vercel deployment)
   const rawURL = import.meta.env.VITE_SERVER_URL || "";
   const SERVER_URL = rawURL && !rawURL.startsWith("http") ? `https://${rawURL}` : rawURL;
+
+  const handleLogin = (success) => {
+    if (success) {
+      setIsAuthenticated(true);
+      localStorage.setItem("is_auth", "true");
+    }
+  };
+
+  if (!isAuthenticated) {
+    return <LoginOnboard onLogin={() => handleLogin(true)} />;
+  }
 
   const startSession = async () => {
     try {
@@ -583,3 +597,72 @@ function AvatarDisplay() {
     </div>
   );
 }
+
+function LoginOnboard({ onLogin }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+
+    // Simulate network delay for feel
+    setTimeout(() => {
+      if (email === "anshul@test.in" && password === "test@anshul.in") {
+        onLogin();
+      } else {
+        setError("Invalid email or password. Please try again.");
+      }
+      setLoading(false);
+    }, 800);
+  };
+
+  return (
+    <div className="login-screen">
+      <div className="login-card">
+        <div className="login-header">
+          <h2>Voice AI</h2>
+          <p>Sign in to access your assistant</p>
+        </div>
+
+        {error && <div className="login-error">{error}</div>}
+
+        <form className="login-form" onSubmit={handleSubmit}>
+          <div className="form-group">
+            <label>Email Address</label>
+            <input
+              type="email"
+              className="form-input"
+              placeholder="anshul@test.in"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+            />
+          </div>
+          <div className="form-group">
+            <label>Password</label>
+            <input
+              type="password"
+              className="form-input"
+              placeholder="••••••••"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+            />
+          </div>
+          <button type="submit" className="login-btn" disabled={loading}>
+            {loading ? "Authenticating..." : "Sign In"}
+          </button>
+        </form>
+
+        <div className="form-footer">
+          <p>Authorized access only</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
