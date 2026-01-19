@@ -1131,3 +1131,21 @@ button.danger:hover {
   font-size: 13px;
   color: var(--text-muted);
 }
+/* Specialized button styles for final report */
+button.success-btn {
+  background: var(--success);
+  box-shadow: 0 4px 14px rgba(16, 185, 129, 0.3);
+}
+
+button.success-btn:hover {
+  background: #059669;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(16, 185, 129, 0.4);
+}
+
+button.waiting {
+  background: rgba(102, 126, 234, 0.1);
+  color: var(--text-muted);
+  cursor: wait;
+  box-shadow: none;
+}
