@@ -231,33 +231,45 @@ function SessionView({ onStop }) {
   }, [room, onStop]);
 
   // Generate comprehensive summary and stop session
-  const handleEndSession = () => {
-    // Stop the session immediately
-    console.log('⏹ Ending session manually...');
+  const handleEndSession = async () => {
+    if (!room) return;
 
-    // Package current local state as a preliminary summary
-    const duration = Math.floor((Date.now() - sessionStart) / 1000);
-    const preliminarySummary = {
-      tool: "end_conversation",
-      status: "success",
-      data: {
-        user: userInfo || { phone: null, name: null },
-        session: {
-          duration_seconds: duration,
-          timestamp: new Date().toISOString(),
-          start_time: new Date(sessionStart).toLocaleTimeString(),
-          end_time: new Date().toLocaleTimeString()
-        },
-        appointments_booked: appointments.filter(a => a.status === "confirmed"),
-        preferences: preferences,
-        transcript: transcripts,
-        pendingSummary: true // Flag to show "Generate AI Summary" button
-      },
-      message: "Session ended"
-    };
+    setWaitingForSummary(true);
+    console.log('⏹ Requesting session end from agent...');
 
-    // Clean up and notify parent
-    onStop(preliminarySummary);
+    try {
+      // Send signal to agent via data channel
+      const encoder = new TextEncoder();
+      const payload = JSON.stringify({ action: "end_session" });
+      await room.local_participant.publishData(encoder.encode(payload), {
+        reliable: true
+      });
+
+      // Set a fallback timer in case the agent summary takes too long (> 10s)
+      window.summaryFallbackTimer = setTimeout(() => {
+        if (waitingForSummary) {
+          console.warn('⚠️ Summary timed out, ending locally...');
+          setWaitingForSummary(false);
+
+          // Local fallback summary
+          const duration = Math.floor((Date.now() - sessionStart) / 1000);
+          onStop({
+            tool: "end_conversation",
+            status: "success",
+            data: {
+              user: userInfo || { phone: null, name: null },
+              session: { duration_seconds: duration },
+              appointments_booked: appointments.filter(a => a.status === "confirmed"),
+              transcript: transcripts,
+            },
+            message: "Session ended (fallback)"
+          });
+        }
+      }, 12000);
+    } catch (e) {
+      console.error('Failed to send end signal:', e);
+      setWaitingForSummary(false);
+    }
   };
 
 
@@ -458,24 +470,37 @@ function SummaryView({ summary, onClose, onNewSession }) {
 
       {/* Cost Breakdown */}
       {cost && (
-        <div className="summary-section">
+        <div className="summary-section cost-breakdown-container">
           <h3>💰 Cost Breakdown</h3>
-          <div className="cost-grid">
-            <div className="cost-item">
-              <span className="cost-label">STT (Deepgram)</span>
-              <span className="cost-val">{cost.stt.usage} | ${cost.stt.cost.toFixed(4)}</span>
+          <div className="cost-summary-grid">
+            <div className="cost-card">
+              <div className="cost-header">STT</div>
+              <div className="cost-body">
+                <div className="cost-usage">{cost.stt.usage}</div>
+                <div className="cost-amt">${cost.stt.cost.toFixed(4)}</div>
+              </div>
+              <div className="cost-footer">{cost.stt.rate}</div>
             </div>
-            <div className="cost-item">
-              <span className="cost-label">TTS (Cartesia)</span>
-              <span className="cost-val">{cost.tts.usage} | ${cost.tts.cost.toFixed(4)}</span>
+            <div className="cost-card">
+              <div className="cost-header">TTS</div>
+              <div className="cost-body">
+                <div className="cost-usage">{cost.tts.usage}</div>
+                <div className="cost-amt">${cost.tts.cost.toFixed(4)}</div>
+              </div>
+              <div className="cost-footer">{cost.tts.rate}</div>
             </div>
-            <div className="cost-item">
-              <span className="cost-label">LLM (Cerebras)</span>
-              <span className="cost-val">{cost.llm.usage} | ${cost.llm.cost.toFixed(4)}</span>
+            <div className="cost-cardHighlight">
+              <div className="cost-header">LLM</div>
+              <div className="cost-body">
+                <div className="cost-usage">{cost.llm.usage}</div>
+                <div className="cost-amt">${cost.llm.cost.toFixed(4)}</div>
+              </div>
+              <div className="cost-footer">{cost.llm.rate}</div>
             </div>
-            <div className="cost-total">
-              <strong>Total Cost: ${cost.total.toFixed(4)}</strong>
-            </div>
+          </div>
+          <div className="cost-total-banner">
+            <span className="total-label">Estimated Session Cost:</span>
+            <span className="total-value">${cost.total.toFixed(4)}</span>
           </div>
         </div>
       )}

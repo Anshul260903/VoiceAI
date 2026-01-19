@@ -645,6 +645,32 @@ Today's date is {datetime.now().strftime("%Y-%m-%d")}.
         except:
             pass
 
+    # Summary generator function
+    async def generate_final_summary():
+        try:
+            logger.info("📊 Generating final summary...")
+            summary_json = await end_conversation("yes")
+            summary_data = json.loads(summary_json)
+            await broadcast(summary_data)
+            logger.info("✅ Final summary broadcasted")
+            # Give a small delay to ensure broadcast finishes before stopping
+            await asyncio.sleep(1)
+            # Signal the session to stop if it hasn't already
+            # This will trigger agent_stopped which we should handle carefully to avoid double summary
+        except Exception as e:
+            logger.error(f"❌ Failed to generate end summary: {e}")
+
+    # Listen for signals from frontend
+    @ctx.room.on("data_received")
+    def on_data_received(data: bytes, participant, kind):
+        try:
+            payload = json.loads(data.decode())
+            if payload.get("action") == "end_session":
+                logger.info("🛑 End session signal received")
+                asyncio.create_task(generate_final_summary())
+        except:
+            pass
+
     # -------------------------
     # Usage Tracking & Transcript Capture
     # -------------------------
@@ -667,13 +693,12 @@ Today's date is {datetime.now().strftime("%Y-%m-%d")}.
     # We estimate based on char counts as a fallback.
     @session.on("llm_response")
     def on_llm_response(response):
-        # We rely on on_agent_transcript for the actual text spoken, but if TTS fails,
-        # this is a backup. However, to avoid duplicates, we'll only track usage here.
-        # session_data.full_transcript.append({"role": "agent", "text": response, "time": time.time()})
-        
-        # Rough token estimation: 1 token ~= 4 chars
+        # Estimate output tokens
         session_data.usage["llm_output_tokens"] += len(response) // 4
-        # We don't easily see the input prompt size here without more hooks
+        
+        # Estimate input tokens (rough guess: history + instructions)
+        # Assuming instructions are ~600 tokens and history grows
+        session_data.usage["llm_input_tokens"] += 800 + (len(session_data.full_transcript) * 50)
 
     # Avatar was already initialized early - now start its connection with the session
     async def start_avatar_async():
@@ -704,17 +729,10 @@ Today's date is {datetime.now().strftime("%Y-%m-%d")}.
     # Session End Handler - Auto-generate summary
     # -------------------------
     def on_agent_stopped():
-        """When session ends, automatically generate and send summary"""
-        async def generate_summary():
-            try:
-                logger.info("📊 Session ending, generating summary...")
-                # Call end_conversation to generate summary
-                await end_conversation("yes")
-                logger.info("✅ Summary generated and sent to frontend")
-            except Exception as e:
-                logger.error(f"❌ Failed to generate end summary: {e}")
-        
-        asyncio.create_task(generate_summary())
+        """When session ends, check if summary was already generated"""
+        # We don't want to double-generate if end_conversation was already called
+        if not any(t.get("tool") == "end_conversation" for t in session_data.full_transcript):
+            asyncio.create_task(generate_final_summary())
 
     session.on("agent_stopped", on_agent_stopped)
 

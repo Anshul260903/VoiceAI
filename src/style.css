@@ -793,40 +793,85 @@ button.danger:hover {
   color: #ef4444;
 }
 
-/* Cost Grid */
-.cost-grid {
+/* Cost Breakdown Styles */
+.cost-summary-grid {
   display: grid;
-  grid-template-columns: 1fr;
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 12px;
+  margin-top: 15px;
+  margin-bottom: 20px;
+}
+
+.cost-card,
+.cost-cardHighlight {
   background: rgba(102, 126, 234, 0.04);
-  padding: 16px;
-  border-radius: var(--radius-sm);
   border: 1px solid var(--glass-border);
-  margin-top: 8px;
+  border-radius: var(--radius-sm);
+  padding: 16px;
+  text-align: center;
+  transition: all 0.3s ease;
 }
 
-.cost-item {
-  display: flex;
-  justify-content: space-between;
+.cost-cardHighlight {
+  background: rgba(124, 58, 237, 0.08);
+  border-color: rgba(124, 58, 237, 0.2);
+}
+
+.cost-card:hover,
+.cost-cardHighlight:hover {
+  transform: translateY(-2px);
+  background: rgba(102, 126, 234, 0.08);
+  box-shadow: var(--shadow-sm);
+}
+
+.cost-header {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.cost-usage {
   font-size: 13px;
-  padding-bottom: 4px;
-  border-bottom: 1px dashed var(--glass-border);
+  color: var(--text-secondary);
+  margin-bottom: 4px;
 }
 
-.cost-label {
+.cost-amt {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.cost-footer {
+  margin-top: 8px;
+  font-size: 10px;
   color: var(--text-muted);
 }
 
-.cost-val {
-  font-family: monospace;
-  color: var(--text-secondary);
+.cost-total-banner {
+  background: linear-gradient(90deg, rgba(124, 58, 237, 0.1) 0%, rgba(124, 58, 237, 0.02) 100%);
+  padding: 20px;
+  border-radius: var(--radius-md);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border: 1px solid rgba(124, 58, 237, 0.15);
+  margin-top: 10px;
 }
 
-.cost-total {
-  margin-top: 8px;
-  text-align: right;
-  color: var(--accent-purple);
+.total-label {
+  font-weight: 600;
+  color: var(--text-secondary);
   font-size: 15px;
+}
+
+.total-value {
+  font-size: 1.6rem;
+  font-weight: 800;
+  color: var(--accent-purple);
 }
 
 /* AI Summary Text */
