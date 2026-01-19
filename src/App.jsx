@@ -636,7 +636,7 @@ function LoginOnboard({ onLogin }) {
             <input
               type="email"
               className="form-input"
-              placeholder="anshul@test.in"
+              placeholder=""
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
@@ -647,7 +647,7 @@ function LoginOnboard({ onLogin }) {
             <input
               type="password"
               className="form-input"
-              placeholder="••••••••"
+              placeholder=""
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
