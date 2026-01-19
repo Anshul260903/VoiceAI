@@ -316,7 +316,7 @@ function SessionView({ onStop }) {
       <div className="card">
         <div className="controls-grid">
           <div className="btn-group">
-            <button id="micBtn" className="danger" onClick={handleEndSession} disabled={waitingForSummary}>
+            <button id="micBtn" className="danger" onClick={handleEndSession}>
               <span id="micIcon">{waitingForSummary ? "⏳" : "⏹"}</span>
               <span id="micText">{waitingForSummary ? "Generating Report..." : "End Session"}</span>
             </button>
