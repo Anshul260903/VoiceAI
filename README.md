@@ -113,7 +113,7 @@ Users can upload documents, customize the agent's behavior via editable system p
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/your-username/VoiceAI.git
+git clone https://github.com/Anshul260903/VoiceAI.git
 cd VoiceAI
 ```
 
