@@ -58,7 +58,7 @@ Users can upload documents, customize the agent's behavior via editable system p
 | **Backend** | Node.js + Express | LiveKit token generation, room config |
 | **Voice Agent** | Python + LiveKit Agents SDK v1.3 | Voice pipeline orchestration |
 | **STT** | Deepgram (Nova-2 Phonecall) | Real-time speech-to-text |
-| **LLM** | Cerebras (Llama 3.3 70B) | Fast inference for responses |
+| **LLM** | Groq (Llama 3.3 70B) | Ultra-fast inference (~300+ tok/s) |
 | **TTS** | Cartesia | Natural voice synthesis |
 | **Vector Store** | ChromaDB | Document embedding storage + retrieval |
 | **KB API** | FastAPI + Uvicorn | Document ingestion + RAG query endpoint |
@@ -103,7 +103,7 @@ Users can upload documents, customize the agent's behavior via editable system p
 |---|---|---|
 | LiveKit Cloud | WebRTC infrastructure | [livekit.io](https://cloud.livekit.io) |
 | Deepgram | Speech-to-Text | [deepgram.com](https://console.deepgram.com) |
-| Cerebras | LLM Inference | [cerebras.ai](https://cloud.cerebras.ai) |
+| Groq | LLM Inference | [groq.com](https://console.groq.com) |
 | Cartesia | Text-to-Speech | [cartesia.ai](https://play.cartesia.ai) |
 
 ---
@@ -152,7 +152,7 @@ PORT=8080
 
 # Agent APIs
 DEEPGRAM_API_KEY=your_deepgram_key
-CEREBRAS_API_KEY=your_cerebras_key
+GROQ_API_KEY=your_groq_key
 CARTESIA_API_KEY=your_cartesia_key
 ```
 
@@ -253,7 +253,7 @@ VoiceAI/
 ### Voice Pipeline
 
 ```
-User speaks → Deepgram STT → Cerebras LLM → Cartesia TTS → User hears
+User speaks → Deepgram STT → Groq LLM → Cartesia TTS → User hears
                                   ↑
                           search_knowledge_base()
                                   ↑
@@ -262,7 +262,7 @@ User speaks → Deepgram STT → Cerebras LLM → Cartesia TTS → User hears
 
 1. **User speaks** into the microphone — audio is streamed via WebRTC to the LiveKit room
 2. **Deepgram STT** transcribes the audio in real-time (streaming, Nova-2 Phonecall model)
-3. **Cerebras LLM** (Llama 3.3 70B) processes the transcript and decides whether to:
+3. **Groq LLM** (Llama 3.3 70B) processes the transcript and decides whether to:
    - Respond directly, or
    - Call `search_knowledge_base` to retrieve document context
 4. If RAG is triggered, **ChromaDB** returns the top-3 most relevant chunks
@@ -282,18 +282,17 @@ User speaks → Deepgram STT → Cerebras LLM → Cartesia TTS → User hears
 
 ## 📊 Performance
 
-Measured latencies from live testing (network: India):
+Measured latencies from live testing (Network: India, Model: Llama 3.3 70B via Groq):
 
 | Metric | Average | Range |
 |---|---|---|
 | **Agent connection** | ~660ms | 650–720ms |
-| **LLM TTFT** (Time to First Token) | ~580ms | 420–950ms |
-| **LLM throughput** | ~67 tok/s | 15–153 tok/s |
+| **LLM TTFT** (Time to First Token) | ~380ms | 300–450ms |
+| **LLM throughput** | ~340 tok/s | 300–400 tok/s |
 | **TTS TTFB** | ~225ms | 206–300ms |
 | **KB search (RAG)** | ~150ms | 138–165ms |
-| **Total response time** (non-RAG) | ~0.8–1.2s | — |
-| **Total response time** (with RAG) | ~1.5–1.8s | — |
-
+| **Total response time** (non-RAG) | ~0.6–0.9s | — |
+| **Total response time** (with RAG) | ~1.2–1.5s | — |
 ---
 
 ## ⚠️ Known Limitations & Tradeoffs
