@@ -254,9 +254,9 @@ async def entrypoint(ctx: JobContext):
     )
     
     llm = openai.LLM(
-        model="llama-3.3-70b-versatile",
-        base_url="https://api.groq.com/openai/v1",
-        api_key=os.environ.get("GROQ_API_KEY"),
+        model="gemini-flash-latest",
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        api_key=os.environ.get("GOOGLE_API_KEY"),
         timeout=60.0,
         temperature=0.7,
         parallel_tool_calls=False,
@@ -307,7 +307,7 @@ Tone:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
                     f"{KB_API_URL}/api/kb/query",
-                    json={"query": query, "top_k": 2},
+                    json={"query": query, "top_k": 1},
                 )
                 data = resp.json()
                 results = data.get("results", [])
@@ -320,6 +320,9 @@ Tone:
                 for r in results:
                     source = r["metadata"]["doc_name"]
                     text = r["text"]
+                    # Truncate text to save tokens
+                    if len(text) > 800:
+                        text = text[:800] + "..."
                     context_parts.append(f"[Source: {source}]\n{text}")
                     sources_for_ui.append({
                         "doc_name": source,

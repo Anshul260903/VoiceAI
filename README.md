@@ -76,12 +76,10 @@ Users can upload documents, customize the agent's behavior via editable system p
 - **Editable first message** — set a custom agent greeting
 
 ### UI Features
-- **Live transcript** — real-time conversation feed with speaker labels
 - **RAG Sources panel** — shows which document chunks were retrieved (doc name, chunk#, relevance %)
-- **Audio visualizer** — animated waveform during active call
 - **Call timer** — live elapsed time display
 - **Agent state indicator** — shows Listening / Thinking / Speaking states
-- **Tool call indicators** — visual feedback when agent uses tools
+- **Post-call transcript** — full conversation transcript available after the session ends
 
 ### Agent Capabilities
 - **Interruption handling** — user can interrupt the agent mid-speech

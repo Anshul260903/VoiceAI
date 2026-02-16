@@ -27,18 +27,6 @@ const TOOL_LABELS = {
   search_knowledge_base: "Searching KB",
 };
 
-const DEFAULT_PROMPT = `You are a specialized Knowledge Base Voice Assistant.
-TIMELINE: Today's date is ${new Date().toLocaleDateString()}.
-
-CRITICAL RULES:
-1. You have NO internal knowledge. You can ONLY answer by searching the database.
-2. For EVERY user query, you MUST call the "search_knowledge_base" tool.
-3. If the search tool returns information, use it to answer directly and concisely.
-4. If the search tool returns "No relevant documents found", or if the user asks about something not in the documents, you MUST say exactly:
-   "I'm sorry, I don't have any information related to that in my documents."
-5. Do NOT make up facts. Do NOT use your own training data.
-6. Keep responses short and conversational.`;
-
 const KB_API_URL = import.meta.env.VITE_KB_API_URL || "http://localhost:8001";
 
 // ===========================
@@ -61,8 +49,22 @@ export default function App() {
   const sessionEndedRef = useRef(false);
 
   // System Prompt state
-  const [systemPrompt, setSystemPrompt] = useState(DEFAULT_PROMPT);
-  const [firstMessage, setFirstMessage] = useState("Hello! I'm your voice AI assistant. How can I help you today?");
+  const DEFAULT_PROMPT = `You are validly a top-tier Sales Agent for a premium stationery company. 
+Your goal is to sell pens by understanding the user's needs (writing style, budget, use case). 
+You have two main products: The Titan Glide (Luxury) and The Eco-Script (Daily usage). 
+Use the available tools to look up specific details about these pens in the Knowledge Base (search_knowledge_base). 
+Be persuasive, enthusiastic, but polite. 
+Always check the Knowledge Base for price and features before quoting. 
+Keep responses concise and conversational.`;
+
+  const DEFAULT_GREETING = "Hello! Welcome to The Pen Station. Are you looking for a smooth writing experience today?";
+
+  const [systemPrompt, setSystemPrompt] = useState(() => {
+    return localStorage.getItem("system_prompt") || DEFAULT_PROMPT;
+  });
+  const [firstMessage, setFirstMessage] = useState(() => {
+    return localStorage.getItem("first_message") || DEFAULT_GREETING;
+  });
   const [promptExpanded, setPromptExpanded] = useState(false);
 
   // Knowledge Base state
@@ -88,6 +90,21 @@ export default function App() {
       }
     } catch (e) {
       console.log("KB API not available yet:", e.message);
+    }
+  };
+
+  const handleSavePrompt = () => {
+    localStorage.setItem("system_prompt", systemPrompt);
+    localStorage.setItem("first_message", firstMessage);
+    alert("✅ Agent persona saved! It will be remembered for next time.");
+  };
+
+  const handleResetPrompt = () => {
+    if (confirm("Reset to default Sales Agent persona?")) {
+      setSystemPrompt(DEFAULT_PROMPT);
+      setFirstMessage(DEFAULT_GREETING);
+      localStorage.removeItem("system_prompt");
+      localStorage.removeItem("first_message");
     }
   };
 
@@ -247,13 +264,23 @@ export default function App() {
                 />
                 <div className="prompt-footer">
                   <span className="char-count">{systemPrompt.length} characters</span>
-                  <button
-                    className="secondary small-btn"
-                    type="button"
-                    onClick={() => { setSystemPrompt(DEFAULT_PROMPT); setFirstMessage("Hello! I'm your voice AI assistant. How can I help you today?"); }}
-                  >
-                    ↺ Reset Default
-                  </button>
+                  <div className="prompt-actions">
+                    <button
+                      className="primary small-btn"
+                      type="button"
+                      onClick={handleSavePrompt}
+                      style={{ marginRight: "8px" }}
+                    >
+                      💾 Save
+                    </button>
+                    <button
+                      className="secondary small-btn"
+                      type="button"
+                      onClick={handleResetPrompt}
+                    >
+                      ↺ Reset Default
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -340,7 +367,7 @@ export default function App() {
             </div>
             {error && <div className="error-msg">{error}</div>}
           </div>
-        </div>
+        </div >
       ) : (
         <LiveKitRoom
           serverUrl={url}
@@ -359,7 +386,7 @@ export default function App() {
           />
         </LiveKitRoom>
       )}
-    </div>
+    </div >
   );
 }
 
