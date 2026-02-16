@@ -85,4 +85,7 @@ vite.config.ts.timestamp-*
 !.yarn/sdks
 !.yarn/versions
 .pnp.*
-.yarn-integrity
+
+# RAG Data
+agent/kb_data/
+agent/debug_ctx.txt

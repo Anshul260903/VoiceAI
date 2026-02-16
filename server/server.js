@@ -1,4 +1,3 @@
-// server/server.js
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -47,11 +46,11 @@ app.post("/generateSummary", async (req, res) => {
             .map((t) => `${t.speaker || t.role}: ${t.text}`)
             .join("\n");
 
-        const prompt = `Summarize this appointment booking conversation. 
+        const prompt = `Summarize this conversation based on the transcript below. 
 Include:
-1. Main purpose of the call
-2. Actions taken (bookings, cancellations)
-3. User preferences mentioned
+1. Main topic discussed
+2. Key questions asked by the user
+3. Answers provided by the assistant
 4. Any follow-up needed
 
 Transcript:

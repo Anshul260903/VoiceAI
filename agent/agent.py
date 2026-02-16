@@ -1,5 +1,5 @@
 # =========================
-# agent.py (WITH TOOLS & AVATAR)
+# agent.py (WITH TOOLS)
 # =========================
 
 import os
@@ -8,6 +8,7 @@ import asyncio
 import logging
 import time
 import json
+import httpx
 from datetime import datetime, timedelta
 from typing import Annotated
 from dotenv import load_dotenv
@@ -41,7 +42,7 @@ from livekit.agents.voice.room_io import RoomOptions
 # -------------------------
 # Plugin imports
 # -------------------------
-from livekit.plugins import deepgram, openai, cartesia, bey
+from livekit.plugins import deepgram, openai, cartesia
 from supabase import create_client, Client
 
 # -------------------------
@@ -57,6 +58,10 @@ supabase: Client = create_client(
     os.environ.get("SUPABASE_URL", ""),
     os.environ.get("SUPABASE_SERVICE_KEY", "")
 )
+
+# Debug URL on startup (Partial Log)
+_supa_url = os.environ.get("SUPABASE_URL", "")
+logger.info(f"🔌 Supabase URL Configured: {'Yes' if _supa_url else 'NO'} ({_supa_url[:15]}...)" )
 
 # -------------------------
 # In-memory storage (per-session)
@@ -113,348 +118,26 @@ def get_cost_breakdown():
 # Tool Functions
 # -------------------------
 
-@function_tool()
-async def identify_user(
-    phone_number: Annotated[str, "The user's phone number"],
-    name: Annotated[str, "The user's name if provided"] = None
-) -> str:
-    """Identify the user by their phone number. Call this when user provides their phone number."""
-    session_data.user_phone = phone_number
-    if name and name.lower() != "null":
-        session_data.user_name = name
-    
-    logger.info(f"📱 User identified: {phone_number} ({name})")
-    
-    try:
-        # Upsert user into Supabase - only update name if provided
-        user_data = {"phone_number": phone_number}
-        if name:
-            user_data["name"] = name
-            
-        supabase.table("users").upsert(user_data).execute()
-        
-        # If name not provided, try to fetch existing name from DB
-        if not name:
-            existing = supabase.table("users").select("name").eq("phone_number", phone_number).execute()
-            if existing.data and existing.data[0].get("name"):
-                session_data.user_name = existing.data[0]["name"]
-                logger.info(f"👤 Found existing user name: {session_data.user_name}")
-        
-        logger.info(f"💾 User {phone_number} sync'd with DB")
-    except Exception as e:
-        logger.error(f"❌ Failed to save user to DB: {e}")
 
-    # Send tool call event to frontend via data channel
-    return json.dumps({
-        "tool": "identify_user",
-        "status": "success",
-        "data": {
-            "phone": phone_number,
-            "name": name
-        },
-        "message": f"User identified with phone {phone_number}" + (f" and name {name}" if name else "")
-    })
-
-
-@function_tool()
-async def fetch_slots(
-    date: Annotated[str, "Optional date to filter slots - can be 'tomorrow', 'day after tomorrow', or YYYY-MM-DD"] = None
-) -> str:
-    """Fetch available appointment slots. Call this when user asks about available times."""
-    
-    target_date = None
-    today = datetime.now().date()
-    
-    if date:
-        date_lower = date.lower().strip()
-        # Handle natural language dates
-        if "tomorrow" in date_lower and "day after" not in date_lower:
-            target_date = today + timedelta(days=1)
-        elif "day after tomorrow" in date_lower:
-            target_date = today + timedelta(days=2)
-        elif "today" in date_lower:
-            target_date = today
-        else:
-            try:
-                target_date = datetime.strptime(date, "%Y-%m-%d").date()
-            except:
-                pass
-    
-    # Generate potential slots for the next 7 days if no date or valid date found
-    start_date = target_date or (today + timedelta(days=1))
-    end_date = target_date or (today + timedelta(days=7))
-    
-    potential_slots = []
-    curr = start_date
-    while curr <= end_date:
-        date_str = curr.strftime("%Y-%m-%d")
-        for hour in [9, 10, 11, 14, 15, 16]:
-            potential_slots.append({"date": date_str, "time": f"{hour:02d}:00"})
-        curr += timedelta(days=1)
-
-    # Query existing confirmed appointments
-    try:
-        query = supabase.table("appointments").select("date, time").eq("status", "confirmed")
-        if target_date:
-            query = query.eq("date", target_date.strftime("%Y-%m-%d"))
-        
-        booked_resp = query.execute()
-        booked_slots = {(b["date"], b["time"][:5]) for b in booked_resp.data}
-    except Exception as e:
-        logger.error(f"❌ Failed to fetch booked slots: {e}")
-        booked_slots = set()
-
-    # Filter available slots
-    available = []
-    for s in potential_slots:
-        if (s["date"], s["time"]) not in booked_slots:
-            available.append({**s, "available": True})
-
-    logger.info(f"📅 Found {len(available)} available slots")
-    
-    return json.dumps({
-        "tool": "fetch_slots",
-        "status": "success",
-        "data": {"slots": available[:10], "date_searched": target_date.strftime("%Y-%m-%d") if target_date else None},
-        "message": f"Found {len(available)} available slots"
-    })
-
-
-@function_tool()
-async def book_appointment(
-    date: Annotated[str, "Appointment date - can be 'tomorrow', 'day after tomorrow', or YYYY-MM-DD"],
-    time: Annotated[str, "Appointment time - can be '2 PM', '10 AM', or HH:MM format"],
-    purpose: Annotated[str | None, "Optional purpose or reason for the appointment"] = None
-) -> str:
-    """Book an appointment for the user. Requires date and time."""
-    
-    # Default purpose if not provided
-    purpose = purpose or "General consultation"
-    
-    if not session_data.user_phone:
-        return json.dumps({
-            "tool": "book_appointment",
-            "status": "error",
-            "message": "Please provide your phone number first to book an appointment"
-        })
-    
-    # Convert natural language date to YYYY-MM-DD
-    today = datetime.now().date()
-    date_lower = date.lower().strip() if date else ""
-    
-    if "tomorrow" in date_lower and "day after" not in date_lower:
-        target_date = (today + timedelta(days=1)).strftime("%Y-%m-%d")
-    elif "day after tomorrow" in date_lower:
-        target_date = (today + timedelta(days=2)).strftime("%Y-%m-%d")
-    elif "today" in date_lower:
-        target_date = today.strftime("%Y-%m-%d")
-    elif len(date) == 10 and "-" in date:
-        target_date = date
-    else:
-        target_date = (today + timedelta(days=1)).strftime("%Y-%m-%d")  # Default to tomorrow
-    
-    # Convert natural language time to HH:MM
-    time_str = time.upper().strip() if time else "10:00"
-    if "AM" in time_str or "PM" in time_str:
-        time_clean = "".join(filter(str.isdigit, time_str))
-        try:
-            hour = int(time_clean)
-            if "PM" in time_str and hour != 12:
-                hour += 12
-            if "AM" in time_str and hour == 12:
-                hour = 0
-            target_time = f"{hour:02d}:00"
-        except ValueError:
-            target_time = "10:00"
-    elif ":" in time_str:
-        target_time = time_str[:5]
-    else:
-        target_time = "10:00"
-    
-    # Check double booking in Supabase
-    try:
-        check = supabase.table("appointments").select("*").eq("date", target_date).eq("time", target_time).eq("status", "confirmed").execute()
-        if check.data:
-            return json.dumps({
-                "tool": "book_appointment",
-                "status": "error",
-                "message": f"Sorry, the slot on {target_date} at {target_time} is already booked. Please choose another time."
-            })
-        
-        # Book it
-        resp = supabase.table("appointments").insert({
-            "user_phone": session_data.user_phone,
-            "date": target_date,
-            "time": target_time,
-            "purpose": purpose,
-            "status": "confirmed"
-        }).execute()
-        
-        appointment = resp.data[0]
-        session_data.appointments.append(appointment)
-        logger.info(f"✅ Appointment booked in DB: {target_date} at {target_time}")
-        
-        return json.dumps({
-            "tool": "book_appointment",
-            "status": "success",
-            "data": appointment,
-            "message": f"Appointment confirmed for {target_date} at {target_time}. Purpose: {purpose}"
-        })
-    except Exception as e:
-        logger.error(f"❌ Booking failed: {e}")
-        return json.dumps({
-            "tool": "book_appointment",
-            "status": "error",
-            "message": "Sorry, I encountered an error while booking your appointment. Please try again."
-        })
-
-
-@function_tool()
-async def retrieve_appointments(
-    status: Annotated[str, "Filter by status: all, confirmed, cancelled"] = "all"
-) -> str:
-    """Retrieve the user's appointments. Call this when user asks about their bookings."""
-    
-    if not session_data.user_phone:
-        return json.dumps({
-            "tool": "retrieve_appointments",
-            "status": "error",
-            "message": "Please provide your phone number first to retrieve appointments"
-        })
-    
-    try:
-        query = supabase.table("appointments").select("*").eq("user_phone", session_data.user_phone)
-        if status != "all":
-            query = query.eq("status", status)
-        
-        resp = query.execute()
-        appointments = resp.data
-        session_data.appointments = appointments
-        
-        logger.info(f"📋 Retrieved {len(appointments)} appointments from DB")
-        
-        return json.dumps({
-            "tool": "retrieve_appointments",
-            "status": "success",
-            "data": {"appointments": appointments},
-            "message": f"Found {len(appointments)} appointment(s)" if appointments else "No appointments found"
-        })
-    except Exception as e:
-        logger.error(f"❌ Failed to retrieve appointments: {e}")
-        return json.dumps({
-            "tool": "retrieve_appointments",
-            "status": "error",
-            "message": "I couldn't retrieve your appointments right now."
-        })
-
-
-@function_tool()
-async def cancel_appointment(
-    appointment_id: Annotated[str, "The appointment ID to cancel (e.g., APT-1)"]
-) -> str:
-    """Cancel an existing appointment. Requires the appointment ID."""
-    
-    try:
-        resp = supabase.table("appointments").update({"status": "cancelled"}).eq("id", appointment_id).eq("user_phone", session_data.user_phone).execute()
-        
-        if not resp.data:
-            return json.dumps({
-                "tool": "cancel_appointment",
-                "status": "error",
-                "message": f"Appointment {appointment_id} not found or doesn't belong to you"
-            })
-        
-        appointment = resp.data[0]
-        logger.info(f"❌ Appointment cancelled in DB: {appointment_id}")
-        
-        return json.dumps({
-            "tool": "cancel_appointment",
-            "status": "success",
-            "data": appointment,
-            "message": f"Appointment on {appointment['date']} at {appointment['time']} has been cancelled"
-        })
-    except Exception as e:
-        logger.error(f"❌ Cancellation failed: {e}")
-        return json.dumps({
-            "tool": "cancel_appointment",
-            "status": "error",
-            "message": "Failed to cancel appointment."
-        })
-
-
-@function_tool()
-async def modify_appointment(
-    appointment_id: Annotated[str, "The appointment ID to modify"],
-    new_date: Annotated[str, "New date in YYYY-MM-DD format"] = None,
-    new_time: Annotated[str, "New time in HH:MM format"] = None
-) -> str:
-    """Modify an existing appointment's date or time."""
-    
-    if not session_data.user_phone:
-        return json.dumps({"tool": "modify_appointment", "status": "error", "message": "Phone number required."})
-
-    try:
-        # Get existing
-        existing = supabase.table("appointments").select("*").eq("id", appointment_id).single().execute()
-        if not existing.data:
-            return json.dumps({"tool": "modify_appointment", "status": "error", "message": "Appointment not found."})
-        
-        target_date = new_date or existing.data["date"]
-        target_time = new_time or existing.data["time"]
-
-        # Check availability
-        check = supabase.table("appointments").select("*").eq("date", target_date).eq("time", target_time).eq("status", "confirmed").execute()
-        if check.data and check.data[0]["id"] != appointment_id:
-            return json.dumps({"tool": "modify_appointment", "status": "error", "message": "That new slot is already taken."})
-
-        # Update
-        resp = supabase.table("appointments").update({
-            "date": target_date,
-            "time": target_time
-        }).eq("id", appointment_id).execute()
-
-        appointment = resp.data[0]
-        logger.info(f"✏️ Appointment modified in DB: {appointment_id}")
-        
-        return json.dumps({
-            "tool": "modify_appointment",
-            "status": "success",
-            "data": appointment,
-            "message": f"Appointment rescheduled to {target_date} at {target_time}"
-        })
-    except Exception as e:
-        logger.error(f"❌ Modification failed: {e}")
-        return json.dumps({"tool": "modify_appointment", "status": "error", "message": "Update failed."})
-
-
-@function_tool()
-async def capture_preference(
-    preference: Annotated[str, "The user's preference or note to remember"],
-    category: Annotated[str, "Category: timing, communication, service, or general"] = "general"
-) -> str:
-    """Capture a user preference or note mentioned during the conversation."""
-    
-    pref_entry = {
-        "user_phone": session_data.user_phone,
-        "preference": preference,
-        "category": category
-    }
-    
-    if session_data.user_phone:
-        try:
-            supabase.table("preferences").insert(pref_entry).execute()
-            logger.info(f"💾 Preference saved to DB for {session_data.user_phone}")
-        except Exception as e:
-            logger.error(f"❌ Failed to save preference: {e}")
-    
-    session_data.preferences.append(pref_entry)
-    return json.dumps({"tool": "capture_preference", "status": "success", "message": f"Noted: {preference}"})
 
 @function_tool()
 async def end_conversation(
     confirmation: Annotated[str, "Say 'yes' to confirm ending the conversation"] = "yes"
 ) -> str:
     """End the conversation and generate a summary."""
+    
+    # -------------------------
+    # PRINT TRANSCRIPT DIRECTLY
+    # -------------------------
+    print("\n" + "="*40)
+    print("📜 FINAL TRANSCRIPT (Bypassing Frontend)")
+    print("="*40)
+    for t in session_data.full_transcript:
+        role = t.get('role', 'unknown').upper()
+        txt = t.get('text', '')
+        print(f"[{role}]: {txt}")
+    print("="*40 + "\n")
+    
     duration = (datetime.now() - session_data.session_start).seconds
     cost_data = get_cost_breakdown()
     
@@ -468,11 +151,11 @@ async def end_conversation(
             # We need to do this carefully within the tool context
             # Since this is an async tool, we can await the LLM
             
-            summary_prompt = f"""Summarize this appointment booking conversation. 
+            summary_prompt = f"""Summarize this conversation based on the transcript below. 
             Include:
-            1. Main purpose of the call
-            2. Actions taken (bookings, cancellations)
-            3. User preferences mentioned
+            1. Main topic discussed
+            2. Key questions asked by the user
+            3. Answers provided by the assistant
             4. Any follow-up needed
             
             Transcript:
@@ -549,76 +232,114 @@ async def entrypoint(ctx: JobContext):
     
     logger.info(f"⚡ Connected in {(time.time()-start)*1000:.0f}ms | Participant: {participant.identity}")
 
-    # -------------------------
-    # Start Avatar Early (Pre-loading optimization)
-    # -------------------------
-    # Initialize avatar session immediately to start connection in background
-    avatar = bey.AvatarSession(
-        api_key=os.environ["BEYOND_PRESENCE_API_KEY"],
-        avatar_id=os.environ["BEYOND_PRESENCE_AVATAR_ID"],
-    )
-    
-    # Start avatar connection task immediately (runs in parallel with service setup)
-    avatar_start_time = time.time()
-    avatar_task = None
-    
-    async def start_avatar_early():
+    # Read room metadata for custom system prompt and greeting
+    custom_prompt = None
+    custom_greeting = None
+    if ctx.room.metadata:
         try:
-            # We'll pass session later, but start the connection process now
-            logger.info(f"🎭 Avatar connection initiated early")
-            return avatar
-        except Exception as e:
-            logger.error(f"❌ Avatar early init failed: {e}")
-            return None
-    
-    # Kick off avatar pre-connection
-    asyncio.create_task(start_avatar_early())
+            room_meta = json.loads(ctx.room.metadata)
+            custom_prompt = room_meta.get("systemPrompt")
+            custom_greeting = room_meta.get("firstMessage")
+            if custom_prompt:
+                logger.info(f"📝 Custom system prompt received ({len(custom_prompt)} chars)")
+            if custom_greeting:
+                logger.info(f"👋 Custom greeting: {custom_greeting[:50]}...")
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("⚠️ Could not parse room metadata")
 
-    # Create services (STT, LLM, TTS run in parallel with avatar)
+    # Create services (STT, LLM, TTS)
     stt = deepgram.STT(
         api_key=os.environ["DEEPGRAM_API_KEY"],
         model="nova-2-phonecall",
     )
     
     llm = openai.LLM(
-        model="llama-3.3-70b",
-        base_url="https://api.cerebras.ai/v1",
-        api_key=os.environ["CEREBRAS_API_KEY"],
+        model="llama-3.3-70b-versatile",
+        base_url="https://api.groq.com/openai/v1",
+        api_key=os.environ.get("GROQ_API_KEY"),
         timeout=60.0,
+        temperature=0.7,
+        parallel_tool_calls=False,
     )
     
     tts = cartesia.TTS(
         api_key=os.environ["CARTESIA_API_KEY"],
-        voice="47f3bbb1-e98f-4e0c-92c5-5f0325e1e206",
+        voice="6786ecbd-b414-479d-b4ce-d500f2961556",
     )
 
-    # Agent instructions
-    instructions = f"""You are a helpful appointment assistant.
-
-Your goals:
-1. Identify the user by phone number immediately.
-2. Help book, modify, or cancel appointments.
-3. Check availability before booking.
-4. Keep responses short and conversational.
-
-Tone:
-- Friendly and professional.
-- CRITICAL: Never speak JSON, technical IDs (like APT-1), or technical tool arguments.
-- Speak naturally (e.g., "I've booked that for you" instead of "Tool book_appointment returned success").
-- If a tool returns technical data, summarize it in plain English.
-
-Tools:
-- Use 'identify_user' first ONLY after the user provides their phone number.
-- Use 'fetch_slots' to see availability.
-- Use 'book_appointment' to confirm bookings.
-- Use 'end_conversation' when the user says goodbye or when finishing a request.
-
-STRICT RULE: You MUST ask for the user's phone number immediately if you don't have it. DO NOT call 'identify_user' with 'null' or guessed values. Wait for the user to speak their number.
-NEVER read out tool arguments or technical IDs to the user.
-If you use a tool, wait for the response and then respond to the user in a natural human voice.
+    # Agent instructions — use custom prompt if provided, otherwise default
+    # -------------------------
+    # Strict RAG Instructions (ALWAYS APPLIED)
+    # -------------------------
+    base_system_prompt = f"""You are a specialized Knowledge Base Voice Assistant.
+    
+CRITICAL INSTRUCTIONS:
+1. You have NO internal knowledge. You can ONLY answer by searching the database via the `search_knowledge_base` tool.
+2. For EVERY user query, you MUST call `search_knowledge_base`.
+3. If the tool returns information, use it to answer the user's question.
+4. If the tool returns "No relevant documents found" or if the answer is not in the tool output, you MUST say exactly:
+   "I'm sorry, I don't have any information related to that in my documents."
+5. Do NOT use your own training data. Do NOT hallucinate.
 
 Today's date is {datetime.now().strftime("%Y-%m-%d")}.
 """
+
+    if custom_prompt:
+        # Prepend strict rules to custom prompt to prevent jailbreaking/hallucination
+        instructions = f"{base_system_prompt}\n\n--- User Context / Persona ---\n{custom_prompt}"
+    else:
+        # Default behavior with standard tone
+        instructions = base_system_prompt + """
+Tone:
+- Helpful, concise, and spoken-style.
+- Natural conversation (but strictly grounded in the tool output).
+"""
+
+    # RAG retrieval tool — queries the KB API
+    KB_API_URL = os.environ.get("KB_API_URL", "http://localhost:8001")
+
+    @function_tool
+    async def search_knowledge_base(
+        query: Annotated[str, "The user's query or a keyword search based on it"],
+    ) -> str:
+        """MANDATORY: Call this tool for EVERY user message to retrieve the answer. You cannot answer without it."""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    f"{KB_API_URL}/api/kb/query",
+                    json={"query": query, "top_k": 2},
+                )
+                data = resp.json()
+                results = data.get("results", [])
+
+                if not results:
+                    return "No relevant documents found in the knowledge base."
+
+                context_parts = []
+                sources_for_ui = []
+                for r in results:
+                    source = r["metadata"]["doc_name"]
+                    text = r["text"]
+                    context_parts.append(f"[Source: {source}]\n{text}")
+                    sources_for_ui.append({
+                        "doc_name": source,
+                        "snippet": text[:150] + ("..." if len(text) > 150 else ""),
+                        "chunk_index": r["metadata"].get("chunk_index", 0),
+                        "relevance": round(1 - r.get("distance", 0), 2),
+                    })
+
+                # Broadcast RAG sources to frontend
+                await broadcast({
+                    "type": "rag_sources",
+                    "query": query,
+                    "sources": sources_for_ui,
+                })
+
+                logger.info(f"🔍 KB search: '{query[:40]}...' → {len(results)} results")
+                return "\n\n---\n\n".join(context_parts)
+        except Exception as e:
+            logger.error(f"❌ KB search failed: {e}")
+            return f"Knowledge base search failed: {str(e)}"
 
     # Create agent with tools
     agent = Agent(
@@ -627,14 +348,8 @@ Today's date is {datetime.now().strftime("%Y-%m-%d")}.
         llm=llm,
         tts=tts,
         tools=[
-            identify_user,
-            fetch_slots,
-            book_appointment,
-            retrieve_appointments,
-            cancel_appointment,
-            modify_appointment,
-            capture_preference,
             end_conversation,
+            search_knowledge_base,
         ],
     )
 
@@ -644,7 +359,7 @@ Today's date is {datetime.now().strftime("%Y-%m-%d")}.
     # Broadcast helper
     async def broadcast(data):
         try:
-            await ctx.room.local_participant.publish_data(json.dumps(data))
+            await ctx.room.local_participant.publish_data(json.dumps(data), reliable=True)
         except:
             pass
 
@@ -665,55 +380,119 @@ Today's date is {datetime.now().strftime("%Y-%m-%d")}.
 
     # Listen for signals from frontend
     @ctx.room.on("data_received")
-    def on_data_received(data: bytes, participant, kind):
-        try:
-            payload = json.loads(data.decode())
-            if payload.get("action") == "end_session":
-                logger.info("🛑 End session signal received - terminating session")
-                # Immediately stop the voice session to silence the bot
-                # Use thread-safe loop to ensure it fires instantly
-                ctx.loop.call_soon_threadsafe(session.stop)
-        except:
-            pass
+    def on_data_received(data, participant=None, kind=None, topic=None):
+        async def _handle():
+            try:
+                # Handle LiveKit DataPacket object (v1.3+ changes)
+                if hasattr(data, 'data'):
+                    payload_bytes = data.data
+                elif isinstance(data, bytes):
+                    payload_bytes = data
+                else:
+                    return
+
+                try:
+                    payload = json.loads(payload_bytes.decode())
+                except:
+                    return
+
+                if payload.get("action") == "end_session":
+                    logger.info("🛑 End session signal received")
+                    try:
+                        await ctx.disconnect()
+                    except Exception as dc_err:
+                        logger.warning(f"Disconnect error (non-fatal): {dc_err}")
+
+            except Exception as e:
+                logger.error(f"Data receive error: {e}")
+
+        asyncio.create_task(_handle())
 
     # -------------------------
-    # Usage Tracking & Transcript Capture
+    # Usage Tracking & Transcript Capture (v1.3.11 correct event names)
     # -------------------------
-    @session.on("user_transcript")
-    def on_user_transcript(transcript):
-        if transcript.final:
-            session_data.full_transcript.append({"role": "user", "text": transcript.text, "time": time.time()})
-            session_data.usage["stt_seconds"] += len(transcript.text) / 15.0 
-            # Send to frontend
-            asyncio.create_task(broadcast({"role": "user", "text": transcript.text}))
+    @session.on("user_input_transcribed")
+    def on_user_input_transcribed(ev):
+        # ev is UserInputTranscribedEvent with .transcript (str) and .is_final (bool)
+        if ev.is_final and ev.transcript:
+            logger.info(f"🗣️ USER: {ev.transcript}")
+            session_data.full_transcript.append({
+                "role": "user",
+                "text": ev.transcript,
+                "time": time.time()
+            })
+            session_data.usage["stt_seconds"] += len(ev.transcript) / 15.0
+            asyncio.create_task(broadcast({"role": "user", "text": ev.transcript}))
 
-    @session.on("agent_transcript")
-    def on_agent_transcript(transcript):
-        session_data.full_transcript.append({"role": "agent", "text": transcript, "time": time.time()})
-        session_data.usage["tts_chars"] += len(transcript)
-        # Send to frontend
-        asyncio.create_task(broadcast({"role": "agent", "text": transcript}))
+    @session.on("conversation_item_added")
+    def on_conversation_item_added(ev):
+        # ev is ConversationItemAddedEvent with .item (ChatMessage)
+        item = ev.item
+        role = getattr(item, "role", None)
+        if role and str(role) == "assistant":
+            content = getattr(item, "content", None)
+            if content:
+                if isinstance(content, str):
+                    text = content
+                elif isinstance(content, list):
+                    text = " ".join(str(c) for c in content if c)
+                else:
+                    text = str(content)
 
-    # Note: Token usage is harder to track without direct LLM plugin events. 
-    # We estimate based on char counts as a fallback.
-    @session.on("llm_response")
-    def on_llm_response(response):
-        # Estimate output tokens
-        session_data.usage["llm_output_tokens"] += len(response) // 4
-        
-        # Estimate input tokens (rough guess: history + instructions)
-        # Assuming instructions are ~600 tokens and history grows
-        session_data.usage["llm_input_tokens"] += 800 + (len(session_data.full_transcript) * 50)
+                if text.strip():
+                    logger.info(f"🤖 AGENT: {text}")
+                    session_data.full_transcript.append({
+                        "role": "agent",
+                        "text": text,
+                        "time": time.time()
+                    })
+                    session_data.usage["tts_chars"] += len(text)
+                    asyncio.create_task(broadcast({"role": "agent", "text": text}))
 
-    # Avatar was already initialized early - now start its connection with the session
-    async def start_avatar_async():
-        try:
-            await avatar.start(room=ctx.room, agent_session=session)
-            logger.info(f"🎭 Avatar connected in {(time.time()-avatar_start_time)*1000:.0f}ms")
-        except Exception as e:
-            logger.error(f"❌ Avatar failed to start: {e}\")")
-    
-    avatar_task = asyncio.create_task(start_avatar_async())
+    @session.on("metrics_collected")
+    def on_metrics(ev):
+        m = ev.metrics
+        if m.type == "stt_metrics":
+            logger.info(f"📊 STT: audio={m.audio_duration:.1f}s | streamed={m.streamed}")
+        elif m.type == "tts_metrics":
+            logger.info(f"📊 TTS: chars={m.characters_count} | ttfb={m.ttfb:.3f}s | audio={m.audio_duration:.1f}s | cancelled={m.cancelled}")
+        elif m.type == "llm_metrics":
+            logger.info(f"📊 LLM: prompt={m.prompt_tokens} | completion={m.completion_tokens} | total={m.total_tokens} | tok/s={m.tokens_per_second:.1f} | ttft={m.ttft:.3f}s")
+            session_data.usage["llm_input_tokens"] += m.prompt_tokens
+            session_data.usage["llm_output_tokens"] += m.completion_tokens
+        elif m.type == "vad_metrics":
+            logger.info(f"📊 VAD: idle={m.idle_time:.1f}s | inferences={m.inference_count} | total_dur={m.inference_duration_total:.3f}s")
+        elif m.type == "eou_metrics":
+            logger.info(f"📊 EOU: utterance_delay={m.end_of_utterance_delay:.3f}s | transcription_delay={m.transcription_delay:.3f}s | turn_completed_delay={m.on_user_turn_completed_delay:.3f}s")
+
+    @session.on("error")
+    def on_error(ev):
+        logger.error(f"❗ SESSION ERROR: source={ev.source} | error={ev.error}")
+
+    @session.on("close")
+    def on_close(ev):
+        logger.info(f"🔒 SESSION CLOSED: reason={ev.reason} | error={ev.error}")
+        # Auto-generate summary when session closes
+        if not session_data.summary_sent:
+            asyncio.create_task(generate_final_summary())
+
+    @session.on("function_tools_executed")
+    def on_tools_executed(ev):
+        for call, output in ev.zipped():
+            status = "✅" if output else "⚠️"
+            logger.info(f"🔧 TOOL {status}: {call.name}({call.arguments})")
+
+    @session.on("user_state_changed")
+    def on_user_state(ev):
+        logger.debug(f"👤 User state: {ev.old_state} → {ev.new_state}")
+
+    @session.on("agent_state_changed")
+    def on_agent_state(ev):
+        logger.debug(f"🤖 Agent state: {ev.old_state} → {ev.new_state}")
+
+    @session.on("speech_created")
+    def on_speech_created(ev):
+        logger.debug(f"🎙️ Speech created: source={ev.source} | user_initiated={ev.user_initiated}")
 
     # Start agent session
     await session.start(
@@ -726,9 +505,10 @@ Today's date is {datetime.now().strftime("%Y-%m-%d")}.
     )
     
     # Greet the user automatically
-    await session.say("Hello! I'm your appointment booking assistant. How can I help you today?", allow_interruptions=True)
+    greeting = custom_greeting or "Hello! I'm your voice AI assistant. How can I help you today?"
+    await session.say(greeting, allow_interruptions=True)
     
-    logger.info(f"🎯 Voice READY in {(time.time()-start)*1000:.0f}ms (avatar loading in background)")
+    logger.info(f"🎯 Voice READY in {(time.time()-start)*1000:.0f}ms")
     
     # -------------------------
     # Session End Handler - Auto-generate summary

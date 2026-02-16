@@ -21,7 +21,7 @@ export function createLivekitRouter() {
     );
 
     router.get("/getToken", async (req, res) => {
-        const { roomName, identity } = req.query;
+        const { roomName, identity, systemPrompt, firstMessage } = req.query;
 
         if (!roomName || !identity) {
             return res.status(400).json({
@@ -30,12 +30,26 @@ export function createLivekitRouter() {
         }
 
         try {
+            // Build room metadata with system prompt if provided
+            const roomMetadata = {};
+            if (systemPrompt) {
+                roomMetadata.systemPrompt = systemPrompt;
+            }
+            if (firstMessage) {
+                roomMetadata.firstMessage = firstMessage;
+            }
+            const metadataStr = Object.keys(roomMetadata).length > 0 ? JSON.stringify(roomMetadata) : undefined;
+
             console.log(`📦 Creating room: ${roomName} with agent dispatch...`);
+            if (systemPrompt) {
+                console.log(`📝 Custom system prompt provided (${systemPrompt.length} chars)`);
+            }
 
             // AWAIT room creation to ensure agent dispatch happens
             try {
                 const room = await roomService.createRoom({
                     name: roomName,
+                    metadata: metadataStr,
                     agents: [{ agentName: "voice-agent" }],
                 });
                 console.log(`✅ Room created: ${room.name}, agent dispatched`);

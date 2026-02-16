@@ -1,39 +1,49 @@
-import { useCallback, useState, useEffect } from "react";
+import { useCallback, useState, useEffect, useRef } from "react";
 import {
   LiveKitRoom,
   RoomAudioRenderer,
   useVoiceAssistant,
-  VideoTrack,
-  useRemoteParticipants,
-  useDataChannel,
   useRoomContext,
 } from "@livekit/components-react";
-import { Track, RoomEvent } from "livekit-client";
+import { RoomEvent } from "livekit-client";
 import "@livekit/components-styles";
 
 // Tool icons mapping
 const TOOL_ICONS = {
   identify_user: "👤",
   fetch_slots: "📅",
-  book_appointment: "✅",
-  retrieve_appointments: "📋",
-  cancel_appointment: "❌",
-  modify_appointment: "✏️",
+
   capture_preference: "💡",
   end_conversation: "👋",
+  search_knowledge_base: "🔍",
 };
 
 const TOOL_LABELS = {
   identify_user: "User Identified",
   fetch_slots: "Fetching Slots",
-  book_appointment: "Booking Appointment",
-  retrieve_appointments: "Loading Appointments",
-  cancel_appointment: "Cancelling",
-  modify_appointment: "Modifying",
+
   capture_preference: "Preference Noted",
   end_conversation: "Ending Session",
+  search_knowledge_base: "Searching KB",
 };
 
+const DEFAULT_PROMPT = `You are a specialized Knowledge Base Voice Assistant.
+TIMELINE: Today's date is ${new Date().toLocaleDateString()}.
+
+CRITICAL RULES:
+1. You have NO internal knowledge. You can ONLY answer by searching the database.
+2. For EVERY user query, you MUST call the "search_knowledge_base" tool.
+3. If the search tool returns information, use it to answer directly and concisely.
+4. If the search tool returns "No relevant documents found", or if the user asks about something not in the documents, you MUST say exactly:
+   "I'm sorry, I don't have any information related to that in my documents."
+5. Do NOT make up facts. Do NOT use your own training data.
+6. Keep responses short and conversational.`;
+
+const KB_API_URL = import.meta.env.VITE_KB_API_URL || "http://localhost:8001";
+
+// ===========================
+// App Root
+// ===========================
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
     return localStorage.getItem("is_auth") === "true";
@@ -45,10 +55,82 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const [summary, setSummary] = useState(null);
+  const [transcripts, setTranscripts] = useState([]);
+  const transcriptsRef = useRef([]);
+  const [sessionStart, setSessionStart] = useState(null);
+  const sessionEndedRef = useRef(false);
 
-  // Backend URL from environment variable (for Vercel deployment)
+  // System Prompt state
+  const [systemPrompt, setSystemPrompt] = useState(DEFAULT_PROMPT);
+  const [firstMessage, setFirstMessage] = useState("Hello! I'm your voice AI assistant. How can I help you today?");
+  const [promptExpanded, setPromptExpanded] = useState(false);
+
+  // Knowledge Base state
+  const [kbDocuments, setKbDocuments] = useState([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
+  const [dragOver, setDragOver] = useState(false);
+
   const rawURL = import.meta.env.VITE_SERVER_URL || "";
   const SERVER_URL = rawURL && !rawURL.startsWith("http") ? `https://${rawURL}` : rawURL;
+
+  // Fetch KB documents on mount
+  useEffect(() => {
+    fetchKBDocuments();
+  }, []);
+
+  const fetchKBDocuments = async () => {
+    try {
+      const resp = await fetch(`${KB_API_URL}/api/kb/documents`);
+      if (resp.ok) {
+        const data = await resp.json();
+        setKbDocuments(data.documents || []);
+      }
+    } catch (e) {
+      console.log("KB API not available yet:", e.message);
+    }
+  };
+
+  const handleFileUpload = async (files) => {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    setUploadError("");
+
+    for (const file of files) {
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
+        const resp = await fetch(`${KB_API_URL}/api/kb/upload`, {
+          method: "POST",
+          body: formData,
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          setUploadError(data.detail || "Upload failed");
+        }
+      } catch (e) {
+        setUploadError(`Upload failed: ${e.message}. Is the KB API running on port 8001?`);
+      }
+    }
+
+    await fetchKBDocuments();
+    setUploading(false);
+  };
+
+  const handleFileDrop = (e) => {
+    e.preventDefault();
+    setDragOver(false);
+    handleFileUpload(e.dataTransfer.files);
+  };
+
+  const handleDeleteDoc = async (docId) => {
+    try {
+      await fetch(`${KB_API_URL}/api/kb/documents/${docId}`, { method: "DELETE" });
+      await fetchKBDocuments();
+    } catch (e) {
+      console.error("Delete failed:", e);
+    }
+  };
 
   const handleLogin = (success) => {
     if (success) {
@@ -65,11 +147,17 @@ export default function App() {
     try {
       setError("");
       setSummary(null);
+      setTranscripts([]);
+      transcriptsRef.current = [];
+      sessionEndedRef.current = false;
+      setSessionStart(Date.now());
       const roomName = `room-${Date.now()}`;
+      const promptParam = systemPrompt ? `&systemPrompt=${encodeURIComponent(systemPrompt)}` : "";
+      const greetingParam = firstMessage ? `&firstMessage=${encodeURIComponent(firstMessage)}` : "";
       const resp = await fetch(
         `${SERVER_URL}/getToken?roomName=${roomName}&identity=user-${Math.floor(
           Math.random() * 1000
-        )}`
+        )}${promptParam}${greetingParam}`
       );
       const data = await resp.json().catch(() => ({}));
 
@@ -89,9 +177,32 @@ export default function App() {
     }
   };
 
+  const handleTranscriptsUpdate = (updater) => {
+    setTranscripts((prev) => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      transcriptsRef.current = next;
+      return next;
+    });
+  };
+
   const stopSession = (summaryData = null) => {
+    if (sessionEndedRef.current && !summaryData) return;
+    sessionEndedRef.current = true;
+
     if (summaryData) {
       setSummary(summaryData);
+    } else if (transcriptsRef.current.length > 0) {
+      const duration = sessionStart ? Math.floor((Date.now() - sessionStart) / 1000) : 0;
+      setSummary({
+        tool: "end_conversation",
+        status: "success",
+        data: {
+          transcript: transcriptsRef.current,
+          session: { duration_seconds: duration },
+          user: {},
+        },
+        message: "Session ended",
+      });
     }
     setToken("");
     setRunning(false);
@@ -99,22 +210,136 @@ export default function App() {
 
   return (
     <div className="container">
-      <header>
-        <h1>Voice AI</h1>
-        <p>Appointment Booking Assistant</p>
-      </header>
+
 
       {summary ? (
         <SummaryView summary={summary} onClose={() => setSummary(null)} onNewSession={startSession} />
       ) : !running ? (
-        <div className="card">
-          <div className="controls-center">
-            <button id="micBtn" onClick={startSession}>
-              <span id="micIcon">🎤</span>
-              <span id="micText">Start Session</span>
-            </button>
+        <div className="pre-call-dashboard">
+          {/* System Prompt Editor */}
+          <div className="card">
+            <div className="section-header" onClick={() => setPromptExpanded(!promptExpanded)}>
+              <div className="section-title">
+                <span className="section-icon">📝</span>
+                <span>System Prompt</span>
+              </div>
+              <button className="toggle-btn" type="button">
+                {promptExpanded ? "▲ Collapse" : "▼ Expand"}
+              </button>
+            </div>
+            {promptExpanded && (
+              <div className="prompt-editor">
+                <label className="field-label">First Message (Agent Greeting)</label>
+                <input
+                  className="greeting-input"
+                  type="text"
+                  value={firstMessage}
+                  onChange={(e) => setFirstMessage(e.target.value)}
+                  placeholder="Hello! How can I help you today?"
+                />
+                <label className="field-label" style={{ marginTop: 14 }}>System Instructions</label>
+                <textarea
+                  className="prompt-textarea"
+                  value={systemPrompt}
+                  onChange={(e) => setSystemPrompt(e.target.value)}
+                  placeholder="Enter the agent's system prompt..."
+                  rows={8}
+                />
+                <div className="prompt-footer">
+                  <span className="char-count">{systemPrompt.length} characters</span>
+                  <button
+                    className="secondary small-btn"
+                    type="button"
+                    onClick={() => { setSystemPrompt(DEFAULT_PROMPT); setFirstMessage("Hello! I'm your voice AI assistant. How can I help you today?"); }}
+                  >
+                    ↺ Reset Default
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
-          {error && <div className="error-msg">{error}</div>}
+
+          {/* Knowledge Base Upload */}
+          <div className="card">
+            <div className="section-header">
+              <div className="section-title">
+                <span className="section-icon">📚</span>
+                <span>Knowledge Base</span>
+              </div>
+              <span className="doc-count">{kbDocuments.length} document{kbDocuments.length !== 1 ? "s" : ""}</span>
+            </div>
+
+            <div
+              className={`upload-area ${dragOver ? "drag-over" : ""}`}
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={handleFileDrop}
+              onClick={() => document.getElementById("kb-file-input").click()}
+            >
+              <input
+                id="kb-file-input"
+                type="file"
+                accept=".pdf,.txt,.docx,.md"
+                multiple
+                style={{ display: "none" }}
+                onChange={(e) => handleFileUpload(e.target.files)}
+              />
+              {uploading ? (
+                <div className="upload-progress">
+                  <div className="spinner" />
+                  <span>Uploading & indexing...</span>
+                </div>
+              ) : (
+                <>
+                  <span className="upload-icon">📄</span>
+                  <span className="upload-text">Drop files here or click to upload</span>
+                  <span className="upload-hint">PDF, TXT, DOCX, MD supported</span>
+                </>
+              )}
+            </div>
+
+            {uploadError && <div className="error-msg">{uploadError}</div>}
+
+            {kbDocuments.length > 0 && (
+              <div className="doc-list">
+                {kbDocuments.map((doc) => (
+                  <div key={doc.id} className="doc-item">
+                    <div className="doc-info">
+                      <span className="doc-icon">
+                        {doc.file_type === "pdf" ? "📕" : doc.file_type === "docx" ? "📘" : "📄"}
+                      </span>
+                      <div className="doc-details">
+                        <span className="doc-name">{doc.filename}</span>
+                        <span className="doc-meta">
+                          {doc.num_chunks} chunks • {(doc.text_length / 1000).toFixed(1)}k chars
+                        </span>
+                      </div>
+                    </div>
+                    <button
+                      className="doc-delete-btn"
+                      onClick={(e) => { e.stopPropagation(); handleDeleteDoc(doc.id); }}
+                      title="Remove document"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Start Session */}
+          <div className="card">
+            <div className="controls-center">
+              <button id="startBtn" className="start-btn" onClick={startSession}>
+                <span className="btn-icon">🎤</span>
+                <span>Start Session</span>
+              </button>
+              <span className="start-subtitle">Tap to begin your voice conversation</span>
+
+            </div>
+            {error && <div className="error-msg">{error}</div>}
+          </div>
         </div>
       ) : (
         <LiveKitRoom
@@ -126,208 +351,184 @@ export default function App() {
           onDisconnected={() => stopSession()}
           className="lk-room-container"
         >
-          <SessionView onStop={stopSession} />
+          <SessionView
+            onStop={stopSession}
+            transcripts={transcripts}
+            onTranscriptsUpdate={handleTranscriptsUpdate}
+            sessionStart={sessionStart}
+          />
         </LiveKitRoom>
       )}
     </div>
   );
 }
 
-function SessionView({ onStop }) {
-  const { state, audioTrack } = useVoiceAssistant();
+
+
+// ===========================
+// Call Timer
+// ===========================
+function CallTimer({ startTime }) {
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startTime) / 1000));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [startTime]);
+
+  const mins = String(Math.floor(elapsed / 60)).padStart(2, "0");
+  const secs = String(elapsed % 60).padStart(2, "0");
+
+  return (
+    <div className="call-timer">
+      <div className="timer-dot" />
+      <span>{mins}:{secs}</span>
+    </div>
+  );
+}
+
+// ===========================
+// Session View (Active Call)
+// ===========================
+function SessionView({ onStop, transcripts, onTranscriptsUpdate, sessionStart }) {
+  const { state } = useVoiceAssistant();
   const room = useRoomContext();
   const [toolCalls, setToolCalls] = useState([]);
   const [userInfo, setUserInfo] = useState(null);
-  const [appointments, setAppointments] = useState([]);
-  const [preferences, setPreferences] = useState([]);
-  const [transcripts, setTranscripts] = useState([]);
-  const [sessionStart] = useState(Date.now());
-  const [waitingForSummary, setWaitingForSummary] = useState(false);
 
-  // Capture actual transcripts from room events
+  const [preferences, setPreferences] = useState([]);
+  const [ragSources, setRagSources] = useState([]);
+  const [ragExpanded, setRagExpanded] = useState(true);
+  const chatEndRef = useRef(null);
+
+  // Auto-scroll transcript chat
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [transcripts]);
+
+  const addTranscript = (entry) => {
+    onTranscriptsUpdate((prev) => {
+      const last = prev[prev.length - 1];
+      if (last && last.text === entry.text && last.speaker === entry.speaker) return prev;
+      return [...prev.slice(-49), entry];
+    });
+  };
+
+  // Listen for data from agent
   useEffect(() => {
     if (!room) return;
 
-    const handleTranscription = (transcription, participant) => {
-      // Find the speaker
-      const speaker = participant?.isAgent ? 'agent' : 'user';
-
-      // Get the text from segments (transcription is an object with a segments array)
-      const text = transcription.segments.map(s => s.text).join(' ').trim();
-      if (!text) return;
-
-      // Only add final segments if possible, but LiveKit component chunks are usually good
-      // For simplicity, we append each chunk. In a real app we'd merge by ID.
-      setTranscripts(prev => {
-        // Check if last message was same speaker and very recent to merge?
-        // Or just append
-        return [...prev.slice(-49), {
-          speaker,
-          text,
-          time: new Date().toLocaleTimeString()
-        }];
-      });
-    };
-
-    // Also keep the tool result listener via data channel
     const handleData = (payload, participant) => {
       const decoder = new TextDecoder();
       const str = decoder.decode(payload);
       try {
         const data = JSON.parse(str);
 
-        // Capture transcript broadcasts from agent (since LiveKit transcription might be flaky)
+        // Transcript broadcasts
         if (data.role && data.text && !data.tool) {
-          setTranscripts(prev => {
-            // Deduplicate: if last message same as this, ignore
-            const last = prev[prev.length - 1];
-            if (last && last.text === data.text && last.speaker === data.role) return prev;
-
-            return [...prev.slice(-49), {
-              speaker: data.role,
-              text: data.text,
-              time: new Date().toLocaleTimeString()
-            }];
+          addTranscript({
+            speaker: data.role,
+            text: data.text,
+            time: new Date().toLocaleTimeString(),
           });
         }
 
-        // Handle tool results
+        // Tool results
         if (data.tool) {
-          setToolCalls(prev => [...prev.slice(-9), {
-            tool: data.tool,
-            status: data.status,
-            message: data.message,
-            timestamp: new Date().toLocaleTimeString()
-          }]);
+          setToolCalls((prev) => [
+            ...prev.slice(-9),
+            {
+              tool: data.tool,
+              status: data.status,
+              message: data.message,
+              timestamp: new Date().toLocaleTimeString(),
+            },
+          ]);
 
           if (data.tool === "identify_user" && data.status === "success") {
             setUserInfo({ phone: data.phone_number, name: data.name });
           }
 
-          if (data.tool === "retrieve_appointments" && data.status === "success") {
-            setAppointments(data.data);
-          }
-
-          if (data.tool === "book_appointment" && data.status === "success") {
-            // Refresh list if needed, or just append
-            setAppointments(prev => [...prev, data.data]);
-          }
           if (data.tool === "end_conversation" && data.status === "success") {
-            setWaitingForSummary(false);
-            if (window.summaryFallbackTimer) clearTimeout(window.summaryFallbackTimer);
-            onStop(data); // Immediately show the report
+            onStop(data);
           }
+        }
+
+        // Handle RAG sources
+        if (data.type === "rag_sources" && data.sources) {
+          setRagSources(data.sources);
         }
       } catch (e) { }
     };
 
-    room.on(RoomEvent.TranscriptionReceived, handleTranscription);
     room.on(RoomEvent.DataReceived, handleData);
-
     return () => {
-      room.off(RoomEvent.TranscriptionReceived, handleTranscription);
       room.off(RoomEvent.DataReceived, handleData);
     };
   }, [room, onStop]);
 
-  // Generate comprehensive summary and stop session
-  const handleEndSession = async () => {
-    if (!room) return;
+  const handleEndSession = () => {
+    const duration = Math.floor((Date.now() - sessionStart) / 1000);
+    const summaryData = {
+      tool: "end_conversation",
+      status: "success",
+      data: {
+        user: userInfo || { phone: null, name: null },
+        session: { duration_seconds: duration },
 
-    setWaitingForSummary(true);
-    console.log('⏹ Requesting session end from agent...');
+        transcript: transcripts,
+        preferences: preferences,
+        pendingSummary: transcripts.length > 0,
+      },
+      message: "Session ended",
+    };
 
     try {
-      // Send signal to agent via data channel
       const encoder = new TextEncoder();
       const payload = JSON.stringify({ action: "end_session" });
-      await room.localParticipant.publishData(encoder.encode(payload), {
-        reliable: true
-      });
-
-      // Set a fallback timer in case the agent summary takes too long
-      window.summaryFallbackTimer = setTimeout(() => {
-        setWaitingForSummary(false);
-
-        const duration = Math.floor((Date.now() - sessionStart) / 1000);
-        onStop({
-          tool: "end_conversation",
-          status: "success",
-          data: {
-            user: userInfo || { phone: null, name: null },
-            session: { duration_seconds: duration },
-            appointments_booked: appointments.filter(a => a.status === "confirmed"),
-            transcript: transcripts,
-          },
-          message: "Session ended (fallback)"
-        });
-      }, 10000);
+      room?.localParticipant?.publishData(encoder.encode(payload), { reliable: true });
     } catch (e) {
-      console.error('Failed to send end signal:', e);
-      setWaitingForSummary(false);
+      console.error("Failed to send end signal:", e);
     }
+
+    onStop(summaryData);
   };
 
+  const stateLabel = {
+    listening: "Listening...",
+    thinking: "Processing...",
+    speaking: "Speaking...",
+    idle: "Ready",
+    connecting: "Connecting...",
+  };
 
-  // Handle tool call results from agent transcripts
-  const handleToolResult = useCallback((result) => {
-    try {
-      const data = JSON.parse(result);
-      if (data.tool) {
-        // Add to tool calls list
-        setToolCalls(prev => [...prev.slice(-4), { ...data, timestamp: Date.now() }]);
-
-        // Handle specific tools
-        if (data.tool === "identify_user" && data.status === "success") {
-          setUserInfo(data.data);
-        }
-        if (data.tool === "book_appointment" && data.status === "success") {
-          setAppointments(prev => [...prev, data.data]);
-        }
-        if (data.tool === "cancel_appointment" && data.status === "success") {
-          setAppointments(prev =>
-            prev.map(a => a.id === data.data.id ? { ...a, status: "cancelled" } : a)
-          );
-        }
-        if (data.tool === "retrieve_appointments" && data.status === "success") {
-          setAppointments(data.data.appointments || []);
-        }
-        if (data.tool === "capture_preference" && data.status === "success") {
-          setPreferences(prev => [...prev, data.data]);
-        }
-        if (data.tool === "end_conversation" && data.status === "success") {
-          // Clear the fallback timer if it exists
-          if (window.summaryFallbackTimer) {
-            clearTimeout(window.summaryFallbackTimer);
-            window.summaryFallbackTimer = null;
-          }
-          setWaitingForSummary(false);
-          console.log('✅ Received agent summary - showing report');
-          onStop(data); // Immediately show the report
-        }
-      }
-    } catch (e) {
-      // Not a JSON tool result, ignore
-    }
-  }, [onStop]);
+  const stateIcon = {
+    listening: "🎤",
+    thinking: "🧠",
+    speaking: "🗣️",
+    idle: "⏸️",
+    connecting: "🔄",
+  };
 
   return (
-    <>
+    <div className="session-container">
+      {/* Top Bar */}
       <div className="card">
-        <div className="controls-grid">
-          <div className="btn-group">
-            <button id="micBtn" className="danger" onClick={handleEndSession}>
-              <span id="micIcon">{waitingForSummary ? "⏳" : "⏹"}</span>
-              <span id="micText">{waitingForSummary ? "Generating Report..." : "End Session"}</span>
+        <div className="session-topbar">
+          <div className="session-left">
+            <button className="danger end-session-btn" onClick={handleEndSession}>
+              <span>⏹</span> End Session
             </button>
+            <CallTimer startTime={sessionStart} />
           </div>
-          <div className="status-indicator">
-            <div className={`pulse-dot ${state === 'speaking' ? 'active' : ''}`}></div>
-            <span>Agent: {state.charAt(0).toUpperCase() + state.slice(1)}</span>
+          <div className={`agent-state-display ${state}`}>
+            <div className={`state-dot ${state === "speaking" || state === "listening" ? "active" : ""}`} />
+            <span>{stateIcon[state] || "⏸️"} {stateLabel[state] || state}</span>
           </div>
         </div>
 
-        {/* User Info Badge */}
         {userInfo && (
           <div className="user-badge">
             <span>👤</span>
@@ -335,10 +536,6 @@ function SessionView({ onStop }) {
           </div>
         )}
 
-        {/* Avatar Video Display */}
-        <AvatarDisplay />
-
-        {/* Tool Calls Display */}
         {toolCalls.length > 0 && (
           <div className="tool-calls">
             {toolCalls.map((tool, i) => (
@@ -353,55 +550,53 @@ function SessionView({ onStop }) {
         )}
       </div>
 
-      {/* Appointments Panel */}
-      {appointments.length > 0 && (
+
+
+
+
+      {/* RAG Sources Panel */}
+      {ragSources.length > 0 && (
         <div className="card">
-          <div className="panel-header">
-            <div className="panel-title">📅 Appointments</div>
+          <div className="panel-header" onClick={() => setRagExpanded(!ragExpanded)} style={{ cursor: "pointer" }}>
+            <div className="panel-title">📚 RAG Sources Used</div>
+            <span className="toggle-indicator">{ragExpanded ? "▲" : "▼"}</span>
           </div>
-          <div className="appointments-list">
-            {appointments.map((apt, i) => (
-              <div key={i} className={`appointment-item ${apt.status}`}>
-                <div className="apt-date">{apt.date} at {apt.time}</div>
-                <div className="apt-purpose">{apt.purpose}</div>
-                <div className={`apt-status ${apt.status}`}>
-                  {apt.status === "confirmed" ? "✓ Confirmed" : "✗ Cancelled"}
+          {ragExpanded && (
+            <div className="rag-sources-list">
+              {ragSources.map((src, i) => (
+                <div key={i} className="rag-source-item">
+                  <div className="rag-source-header">
+                    <span className="rag-doc-name">📄 {src.doc_name}</span>
+                    <span className="rag-chunk-badge">Chunk {src.chunk_index + 1}</span>
+                    <span className="rag-relevance" title="Relevance score">
+                      {Math.round(src.relevance * 100)}% match
+                    </span>
+                  </div>
+                  <div className="rag-source-snippet">{src.snippet}</div>
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
-      <div className="card">
-        <div className="panel-header">
-          <div className="panel-title">Live Conversation</div>
-        </div>
-        <div id="live" className="panel">
-          {state === 'listening' && "🎤 Listening..."}
-          {state === 'thinking' && "🤔 Processing..."}
-          {state === 'speaking' && "🗣️ Speaking..."}
-          {state === 'idle' && "Say 'Hello' to start!"}
-          {state === 'connecting' && "🔄 Connecting..."}
-        </div>
-      </div>
-
       <RoomAudioRenderer />
-    </>
+    </div>
   );
 }
 
-// Summary view after conversation ends
+// ===========================
+// Summary View
+// ===========================
 function SummaryView({ summary, onClose, onNewSession }) {
   const [data, setData] = useState(summary.data || {});
   const [loadingAI, setLoadingAI] = useState(false);
 
-  const appointments = data.appointments_booked || [];
-  const cancelled = data.appointments_cancelled || [];
+
   const user = data.user || {};
   const session = data.session || {};
   const toolCalls = data.tool_calls || [];
-  const transcripts = data.transcript || data.transcripts || []; // Handle both formats
+  const transcripts = data.transcript || data.transcripts || [];
   const summaryText = data.summary_text;
   const cost = data.cost_breakdown;
 
@@ -413,11 +608,11 @@ function SummaryView({ summary, onClose, onNewSession }) {
       const resp = await fetch(`${SERVER_URL}/generateSummary`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ transcript: transcripts })
+        body: JSON.stringify({ transcript: transcripts }),
       });
       const result = await resp.json();
       if (result.summary_text) {
-        setData(prev => ({ ...prev, summary_text: result.summary_text, pendingSummary: false }));
+        setData((prev) => ({ ...prev, summary_text: result.summary_text, pendingSummary: false }));
       }
     } catch (e) {
       console.error("AI Summary Error:", e);
@@ -432,11 +627,11 @@ function SummaryView({ summary, onClose, onNewSession }) {
         <h2>📋 Session Summary</h2>
         <div className="summary-meta">
           <span className="summary-time">
-            Duration: {Math.floor(session.duration_seconds / 60)}m {session.duration_seconds % 60}s
+            ⏱ {Math.floor((session.duration_seconds || 0) / 60)}m {(session.duration_seconds || 0) % 60}s
           </span>
           {session.start_time && (
             <span className="summary-timestamp">
-              {session.start_time} - {session.end_time}
+              {session.start_time} — {session.end_time}
             </span>
           )}
         </div>
@@ -450,23 +645,25 @@ function SummaryView({ summary, onClose, onNewSession }) {
         </div>
       )}
 
-      {/* AI Generated Summary */}
+      {/* AI Summary */}
       {summaryText ? (
         <div className="summary-section ai-summary">
           <h3>✨ AI Summary</h3>
           <p className="summary-text-content">{summaryText}</p>
         </div>
-      ) : data.pendingSummary && (
-        <div className="summary-section ai-summary-trigger">
-          <button className="generate-ai-btn" onClick={generateAISummary} disabled={loadingAI}>
-            {loadingAI ? "⏳ Analyzing conversation..." : "✨ Generate AI Summary"}
-          </button>
-        </div>
+      ) : (
+        data.pendingSummary && (
+          <div className="summary-section ai-summary-trigger">
+            <button className="generate-ai-btn" onClick={generateAISummary} disabled={loadingAI}>
+              {loadingAI ? "⏳ Analyzing conversation..." : "✨ Generate AI Summary"}
+            </button>
+          </div>
+        )
       )}
 
       {/* Cost Breakdown */}
       {cost && (
-        <div className="summary-section cost-breakdown-container">
+        <div className="summary-section">
           <h3>💰 Cost Breakdown</h3>
           <div className="cost-summary-grid">
             <div className="cost-card">
@@ -501,14 +698,16 @@ function SummaryView({ summary, onClose, onNewSession }) {
         </div>
       )}
 
-      {/* Conversation Transcript */}
+      {/* Transcript */}
       {transcripts.length > 0 && (
         <div className="summary-section">
           <h3>💬 Conversation</h3>
           <div className="transcript-list">
             {transcripts.slice(-50).map((t, i) => (
               <div key={i} className={`transcript-item ${t.speaker || t.role}`}>
-                <span className="transcript-speaker">{(t.speaker === 'user' || t.role === 'user') ? 'You' : 'Agent'}:</span>
+                <span className="transcript-speaker">
+                  {t.speaker === "user" || t.role === "user" ? "You" : "Agent"}:
+                </span>
                 <span className="transcript-text">{t.text}</span>
               </div>
             ))}
@@ -516,17 +715,17 @@ function SummaryView({ summary, onClose, onNewSession }) {
         </div>
       )}
 
-      {/* Actions Taken (Tool Calls) */}
+      {/* Tool Calls */}
       {toolCalls.length > 0 && (
         <div className="summary-section">
           <h3>🔧 Actions Taken</h3>
           <div className="actions-list">
             {toolCalls.map((tc, i) => (
               <div key={i} className={`action-item ${tc.status}`}>
-                <span className="action-icon">{TOOL_ICONS[tc.tool] || '⚙️'}</span>
+                <span className="action-icon">{TOOL_ICONS[tc.tool] || "⚙️"}</span>
                 <span className="action-name">{TOOL_LABELS[tc.tool] || tc.tool}</span>
                 <span className={`action-status ${tc.status}`}>
-                  {tc.status === 'success' ? '✓' : '✗'}
+                  {tc.status === "success" ? "✓" : "✗"}
                 </span>
               </div>
             ))}
@@ -534,31 +733,7 @@ function SummaryView({ summary, onClose, onNewSession }) {
         </div>
       )}
 
-      {/* Appointments Booked */}
-      {appointments.length > 0 && (
-        <div className="summary-section">
-          <h3>✅ Appointments Booked</h3>
-          {appointments.map((apt, i) => (
-            <div key={i} className="summary-apt">
-              <strong>{apt.date}</strong> at <strong>{apt.time}</strong>
-              <br />
-              <span className="apt-purpose">{apt.purpose}</span>
-            </div>
-          ))}
-        </div>
-      )}
 
-      {/* Appointments Cancelled */}
-      {cancelled.length > 0 && (
-        <div className="summary-section">
-          <h3>❌ Appointments Cancelled</h3>
-          {cancelled.map((apt, i) => (
-            <div key={i} className="summary-apt cancelled">
-              {apt.date} at {apt.time}
-            </div>
-          ))}
-        </div>
-      )}
 
       {/* Preferences */}
       {(data.preferences || []).length > 0 && (
@@ -572,8 +747,8 @@ function SummaryView({ summary, onClose, onNewSession }) {
         </div>
       )}
 
-      {/* No activity message */}
-      {appointments.length === 0 && cancelled.length === 0 && transcripts.length === 0 && (
+      {/* No activity */}
+      {transcripts.length === 0 && (
         <div className="summary-section">
           <p className="no-appointments">No activity recorded in this session.</p>
         </div>
@@ -591,34 +766,9 @@ function SummaryView({ summary, onClose, onNewSession }) {
   );
 }
 
-// Avatar video display component
-function AvatarDisplay() {
-  const participants = useRemoteParticipants();
-
-  const avatarParticipant = participants.find(p =>
-    p.videoTrackPublications.size > 0
-  );
-
-  const videoTrack = avatarParticipant?.videoTrackPublications.values().next().value?.track;
-
-  if (!videoTrack) {
-    return (
-      <div className="avatar-container avatar-loading">
-        <div className="avatar-placeholder">
-          <span>🎭</span>
-          <p>Loading Avatar...</p>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="avatar-container">
-      <VideoTrack trackRef={{ participant: avatarParticipant, source: Track.Source.Camera }} />
-    </div>
-  );
-}
-
+// ===========================
+// Login Page
+// ===========================
 function LoginOnboard({ onLogin }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -630,7 +780,6 @@ function LoginOnboard({ onLogin }) {
     setLoading(true);
     setError("");
 
-    // Simulate network delay for feel
     setTimeout(() => {
       if (email === "anshul@test.in" && password === "test@anshul.in") {
         onLogin();
@@ -645,7 +794,7 @@ function LoginOnboard({ onLogin }) {
     <div className="login-screen">
       <div className="login-card">
         <div className="login-header">
-          <h2>Voice AI</h2>
+
           <p>Sign in to access your assistant</p>
         </div>
 
@@ -657,7 +806,7 @@ function LoginOnboard({ onLogin }) {
             <input
               type="email"
               className="form-input"
-              placeholder=""
+              placeholder="Enter your email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
@@ -668,7 +817,7 @@ function LoginOnboard({ onLogin }) {
             <input
               type="password"
               className="form-input"
-              placeholder=""
+              placeholder="Enter your password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
@@ -686,4 +835,3 @@ function LoginOnboard({ onLogin }) {
     </div>
   );
 }
-
