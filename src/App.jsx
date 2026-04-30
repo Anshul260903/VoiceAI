@@ -4,15 +4,26 @@ import {
   RoomAudioRenderer,
   useVoiceAssistant,
   useRoomContext,
+  useTracks,
+  ParticipantTile,
+  GridLayout,
 } from "@livekit/components-react";
-import { RoomEvent } from "livekit-client";
+import { RoomEvent, Track } from "livekit-client";
 import "@livekit/components-styles";
+
+const COST_STT_PER_MIN = Number(import.meta.env.VITE_COST_STT_PER_MINUTE_USD ?? "0.0058");
+const COST_TTS_PER_CHAR = Number(import.meta.env.VITE_COST_TTS_PER_CHAR_USD ?? "0.00001");
+const COST_LLM_IN_PER_TOKEN = Number(import.meta.env.VITE_COST_LLM_INPUT_PER_TOKEN_USD ?? "0.00000059");
+const COST_LLM_OUT_PER_TOKEN = Number(import.meta.env.VITE_COST_LLM_OUTPUT_PER_TOKEN_USD ?? "0.00000079");
 
 // Tool icons mapping
 const TOOL_ICONS = {
   identify_user: "👤",
   fetch_slots: "📅",
-
+  book_appointment: "✅",
+  retrieve_appointments: "📂",
+  cancel_appointment: "❌",
+  modify_appointment: "🔄",
   capture_preference: "💡",
   end_conversation: "👋",
   search_knowledge_base: "🔍",
@@ -21,13 +32,16 @@ const TOOL_ICONS = {
 const TOOL_LABELS = {
   identify_user: "User Identified",
   fetch_slots: "Fetching Slots",
-
+  book_appointment: "Booking Confirmed",
+  retrieve_appointments: "Retrieving Appointments",
+  cancel_appointment: "Appointment Cancelled",
+  modify_appointment: "Appointment Modified",
   capture_preference: "Preference Noted",
   end_conversation: "Ending Session",
   search_knowledge_base: "Searching KB",
 };
 
-const KB_API_URL = import.meta.env.VITE_KB_API_URL || "http://localhost:8001";
+const KB_API_URL = import.meta.env.VITE_KB_API_URL ?? "http://localhost:8001";
 
 // ===========================
 // App Root
@@ -40,6 +54,7 @@ export default function App() {
     import.meta.env.VITE_LIVEKIT_URL || "wss://voice-ai-eon55hwv.livekit.cloud"
   );
   const [token, setToken] = useState("");
+  const [roomName, setRoomName] = useState("");
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const [summary, setSummary] = useState(null);
@@ -49,15 +64,15 @@ export default function App() {
   const sessionEndedRef = useRef(false);
 
   // System Prompt state
-  const DEFAULT_PROMPT = `You are validly a top-tier Sales Agent for a premium stationery company. 
-Your goal is to sell pens by understanding the user's needs (writing style, budget, use case). 
-You have two main products: The Titan Glide (Luxury) and The Eco-Script (Daily usage). 
-Use the available tools to look up specific details about these pens in the Knowledge Base (search_knowledge_base). 
-Be persuasive, enthusiastic, but polite. 
-Always check the Knowledge Base for price and features before quoting. 
+  const DEFAULT_PROMPT = `You are a healthcare front-desk AI voice assistant.
+Identify users by phone number, collect name, and help with appointments.
+Use tools to fetch slots, book, retrieve, cancel, and modify appointments.
+Working hours are 10:00 to 17:00, slot length is 45 minutes.
+No cancellation or modification is allowed within 1 hour of appointment time.
+Always confirm date, time, and intent before final booking.
 Keep responses concise and conversational.`;
 
-  const DEFAULT_GREETING = "Hello! Welcome to The Pen Station. Are you looking for a smooth writing experience today?";
+  const DEFAULT_GREETING = "Hello! I am your healthcare assistant. I can help you book, reschedule, cancel, or review appointments.";
 
   const [systemPrompt, setSystemPrompt] = useState(() => {
     return localStorage.getItem("system_prompt") || DEFAULT_PROMPT;
@@ -169,6 +184,7 @@ Keep responses concise and conversational.`;
       sessionEndedRef.current = false;
       setSessionStart(Date.now());
       const roomName = `room-${Date.now()}`;
+      setRoomName(roomName);
       const promptParam = systemPrompt ? `&systemPrompt=${encodeURIComponent(systemPrompt)}` : "";
       const greetingParam = firstMessage ? `&firstMessage=${encodeURIComponent(firstMessage)}` : "";
       const resp = await fetch(
@@ -383,6 +399,7 @@ Keep responses concise and conversational.`;
             transcripts={transcripts}
             onTranscriptsUpdate={handleTranscriptsUpdate}
             sessionStart={sessionStart}
+            roomName={roomName}
           />
         </LiveKitRoom>
       )}
@@ -419,11 +436,24 @@ function CallTimer({ startTime }) {
 // ===========================
 // Session View (Active Call)
 // ===========================
-function SessionView({ onStop, transcripts, onTranscriptsUpdate, sessionStart }) {
+function SessionView({ onStop, transcripts, onTranscriptsUpdate, sessionStart, roomName }) {
   const { state } = useVoiceAssistant();
   const room = useRoomContext();
   const [toolCalls, setToolCalls] = useState([]);
   const [userInfo, setUserInfo] = useState(null);
+  const [ending, setEnding] = useState(false);
+  const [avatarError, setAvatarError] = useState("");
+  const [avatarDebug, setAvatarDebug] = useState({
+    participantIdentity: null,
+    participantName: null,
+    cameraTrackSid: null,
+    micTrackSid: null,
+    micSubscribed: false,
+    cameraSubscribed: false,
+    connectedParticipants: 0,
+  });
+  const avatarStartLockRef = useRef(false);
+  const avatarRoomRef = useRef("");
 
   const [preferences, setPreferences] = useState([]);
   const [ragSources, setRagSources] = useState([]);
@@ -434,6 +464,37 @@ function SessionView({ onStop, transcripts, onTranscriptsUpdate, sessionStart })
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [transcripts]);
+
+  const startAvatarSession = async () => {
+    if (!roomName) return;
+    if (avatarStartLockRef.current && avatarRoomRef.current === roomName) return;
+    avatarStartLockRef.current = true;
+    avatarRoomRef.current = roomName;
+    const rawURL = import.meta.env.VITE_SERVER_URL || "";
+    const SERVER_URL = rawURL && !rawURL.startsWith("http") ? `https://${rawURL}` : rawURL;
+    try {
+      const resp = await fetch(`${SERVER_URL}/startAvatar`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roomName }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        setAvatarError(err?.error || "Avatar failed to start");
+      } else {
+        setAvatarError("");
+      }
+    } catch (e) {
+      setAvatarError("Avatar startup request failed");
+    }
+  };
+
+  // Start Beyond Presence avatar session once room is active
+  useEffect(() => {
+    avatarStartLockRef.current = false;
+    avatarRoomRef.current = roomName || "";
+    startAvatarSession();
+  }, [roomName]);
 
   const addTranscript = (entry) => {
     onTranscriptsUpdate((prev) => {
@@ -491,12 +552,75 @@ function SessionView({ onStop, transcripts, onTranscriptsUpdate, sessionStart })
     };
 
     room.on(RoomEvent.DataReceived, handleData);
+
+    const refreshAvatarDebug = () => {
+      try {
+        const participants = Array.from(room.remoteParticipants.values());
+        const avatarParticipant = participants.find((p) => {
+          const id = p.identity || "";
+          const nm = (p.name || "").toLowerCase();
+          return id.startsWith("bey-avatar-") || nm.includes("beyond presence");
+        });
+
+        if (!avatarParticipant) {
+          setAvatarDebug((prev) => ({
+            ...prev,
+            participantIdentity: null,
+            participantName: null,
+            cameraTrackSid: null,
+            micTrackSid: null,
+            micSubscribed: false,
+            cameraSubscribed: false,
+            connectedParticipants: participants.length,
+          }));
+          return;
+        }
+
+        const camPub = Array.from(avatarParticipant.trackPublications.values()).find(
+          (pub) => pub.kind === "video" || pub.source === Track.Source.Camera
+        );
+        const micPub = Array.from(avatarParticipant.trackPublications.values()).find(
+          (pub) => pub.kind === "audio" || pub.source === Track.Source.Microphone
+        );
+
+        const nextDebug = {
+          participantIdentity: avatarParticipant.identity || null,
+          participantName: avatarParticipant.name || null,
+          cameraTrackSid: camPub?.trackSid || null,
+          micTrackSid: micPub?.trackSid || null,
+          micSubscribed: !!micPub?.isSubscribed,
+          cameraSubscribed: !!camPub?.isSubscribed,
+          connectedParticipants: participants.length,
+        };
+        setAvatarDebug(nextDebug);
+        console.log("Avatar debug:", nextDebug);
+      } catch (e) {
+        console.warn("Avatar debug refresh failed:", e);
+      }
+    };
+
+    refreshAvatarDebug();
+    room.on(RoomEvent.ParticipantConnected, refreshAvatarDebug);
+    room.on(RoomEvent.ParticipantDisconnected, refreshAvatarDebug);
+    room.on(RoomEvent.TrackSubscribed, refreshAvatarDebug);
+    room.on(RoomEvent.TrackUnsubscribed, refreshAvatarDebug);
+    room.on(RoomEvent.TrackPublished, refreshAvatarDebug);
+    room.on(RoomEvent.TrackUnpublished, refreshAvatarDebug);
+
     return () => {
       room.off(RoomEvent.DataReceived, handleData);
+      room.off(RoomEvent.ParticipantConnected, refreshAvatarDebug);
+      room.off(RoomEvent.ParticipantDisconnected, refreshAvatarDebug);
+      room.off(RoomEvent.TrackSubscribed, refreshAvatarDebug);
+      room.off(RoomEvent.TrackUnsubscribed, refreshAvatarDebug);
+      room.off(RoomEvent.TrackPublished, refreshAvatarDebug);
+      room.off(RoomEvent.TrackUnpublished, refreshAvatarDebug);
     };
   }, [room, onStop]);
 
   const handleEndSession = () => {
+    if (ending) return;
+    setEnding(true);
     const duration = Math.floor((Date.now() - sessionStart) / 1000);
     const summaryData = {
       tool: "end_conversation",
@@ -520,7 +644,11 @@ function SessionView({ onStop, transcripts, onTranscriptsUpdate, sessionStart })
       console.error("Failed to send end signal:", e);
     }
 
-    onStop(summaryData);
+    // Wait briefly for backend-generated end_conversation payload (includes cost breakdown).
+    // Fallback to local summary only if backend payload is not received in time.
+    setTimeout(() => {
+      onStop(summaryData);
+    }, 4500);
   };
 
   const stateLabel = {
@@ -539,14 +667,21 @@ function SessionView({ onStop, transcripts, onTranscriptsUpdate, sessionStart })
     connecting: "🔄",
   };
 
+  const cameraTracks = useTracks([{ source: Track.Source.Camera, withPlaceholder: false }]);
+  const avatarTracks = cameraTracks.filter((t) => {
+    const id = t.participant?.identity || "";
+    const name = t.participant?.name || "";
+    return id.startsWith("bey-avatar-") || name.toLowerCase().includes("beyond presence");
+  });
+
   return (
     <div className="session-container">
       {/* Top Bar */}
       <div className="card">
         <div className="session-topbar">
           <div className="session-left">
-            <button className="danger end-session-btn" onClick={handleEndSession}>
-              <span>⏹</span> End Session
+            <button className="danger end-session-btn" onClick={handleEndSession} disabled={ending}>
+              <span>⏹</span> {ending ? "Ending..." : "End Session"}
             </button>
             <CallTimer startTime={sessionStart} />
           </div>
@@ -575,6 +710,30 @@ function SessionView({ onStop, transcripts, onTranscriptsUpdate, sessionStart })
             ))}
           </div>
         )}
+      </div>
+
+      <div className="card">
+        <div className="panel-title">👤 Live Avatar</div>
+        {avatarError ? (
+          <div className="error-msg">{avatarError}</div>
+        ) : (
+          <div style={{ minHeight: 220 }}>
+            {avatarTracks.length > 0 ? (
+              <GridLayout tracks={avatarTracks.slice(0, 1)}>
+                <ParticipantTile />
+              </GridLayout>
+            ) : (
+              <div className="error-msg">Waiting for Beyond Presence avatar video...</div>
+            )}
+          </div>
+        )}
+        <div style={{ marginTop: 10, fontSize: 12, opacity: 0.85 }}>
+          <div>Participants: {avatarDebug.connectedParticipants}</div>
+          <div>Avatar ID: {avatarDebug.participantIdentity || "not joined"}</div>
+          <div>Avatar Name: {avatarDebug.participantName || "n/a"}</div>
+          <div>Camera Track: {avatarDebug.cameraTrackSid || "none"} ({avatarDebug.cameraSubscribed ? "subscribed" : "not subscribed"})</div>
+          <div>Mic Track: {avatarDebug.micTrackSid || "none"} ({avatarDebug.micSubscribed ? "subscribed" : "not subscribed"})</div>
+        </div>
       </div>
 
 
@@ -617,36 +776,57 @@ function SessionView({ onStop, transcripts, onTranscriptsUpdate, sessionStart })
 // ===========================
 function SummaryView({ summary, onClose, onNewSession }) {
   const [data, setData] = useState(summary.data || {});
-  const [loadingAI, setLoadingAI] = useState(false);
 
 
   const user = data.user || {};
   const session = data.session || {};
   const toolCalls = data.tool_calls || [];
   const transcripts = data.transcript || data.transcripts || [];
-  const summaryText = data.summary_text;
-  const cost = data.cost_breakdown;
-
-  const generateAISummary = async () => {
-    setLoadingAI(true);
-    const rawURL = import.meta.env.VITE_SERVER_URL || "";
-    const SERVER_URL = rawURL && !rawURL.startsWith("http") ? `https://${rawURL}` : rawURL;
-    try {
-      const resp = await fetch(`${SERVER_URL}/generateSummary`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ transcript: transcripts }),
-      });
-      const result = await resp.json();
-      if (result.summary_text) {
-        setData((prev) => ({ ...prev, summary_text: result.summary_text, pendingSummary: false }));
-      }
-    } catch (e) {
-      console.error("AI Summary Error:", e);
-    } finally {
-      setLoadingAI(false);
-    }
+  const buildFallbackSummary = () => {
+    const userLines = transcripts.filter((t) => (t.speaker || t.role) === "user").map((t) => t.text).slice(0, 3);
+    const agentLines = transcripts.filter((t) => (t.speaker || t.role) !== "user").map((t) => t.text).slice(0, 3);
+    const minutes = Math.floor((session.duration_seconds || 0) / 60);
+    const seconds = (session.duration_seconds || 0) % 60;
+    const userPart = userLines.length ? `User asked about: ${userLines.join(" | ")}.` : "User interaction was captured.";
+    const agentPart = agentLines.length ? `Assistant response included: ${agentLines.join(" | ")}.` : "Assistant response was limited.";
+    return `${userPart} ${agentPart} Session duration was ${minutes}m ${seconds}s.`;
   };
+  const summaryText = data.summary_text || buildFallbackSummary();
+  const buildFallbackCost = () => {
+    const userText = transcripts
+      .filter((t) => (t.speaker || t.role) === "user")
+      .map((t) => t.text || "")
+      .join(" ");
+    const agentText = transcripts
+      .filter((t) => (t.speaker || t.role) !== "user")
+      .map((t) => t.text || "")
+      .join(" ");
+
+    const sttSeconds = Math.max((userText.length || 0) / 15.0, session.duration_seconds || 0);
+    const ttsChars = agentText.length || 0;
+    const approxTotalTokens = Math.ceil((userText.length + agentText.length) / 4);
+    const llmInputTokens = Math.ceil(approxTotalTokens * 0.65);
+    const llmOutputTokens = Math.ceil(approxTotalTokens * 0.35);
+
+    const sttCost = (sttSeconds / 60.0) * COST_STT_PER_MIN;
+    const ttsCost = ttsChars * COST_TTS_PER_CHAR;
+    const llmInputCost = llmInputTokens * COST_LLM_IN_PER_TOKEN;
+    const llmOutputCost = llmOutputTokens * COST_LLM_OUT_PER_TOKEN;
+    const llmCost = llmInputCost + llmOutputCost;
+    const total = sttCost + ttsCost + llmCost;
+
+    return {
+      stt: { usage: `${sttSeconds.toFixed(1)}s`, cost: sttCost, rate: `$${COST_STT_PER_MIN.toFixed(4)}/min (est.)` },
+      tts: { usage: `${ttsChars} chars`, cost: ttsCost, rate: `$${(COST_TTS_PER_CHAR * 1_000_000).toFixed(2)}/1M chars (est.)` },
+      llm: {
+        usage: `${llmInputTokens}in + ${llmOutputTokens}out tokens`,
+        cost: llmCost,
+        rate: `$${(COST_LLM_IN_PER_TOKEN * 1_000_000).toFixed(2)}/1M in, $${(COST_LLM_OUT_PER_TOKEN * 1_000_000).toFixed(2)}/1M out (est.)`,
+      },
+      total,
+    };
+  };
+  const cost = data.cost_breakdown || buildFallbackCost();
 
   return (
     <div className="card summary-card">
@@ -673,20 +853,10 @@ function SummaryView({ summary, onClose, onNewSession }) {
       )}
 
       {/* AI Summary */}
-      {summaryText ? (
-        <div className="summary-section ai-summary">
-          <h3>✨ AI Summary</h3>
-          <p className="summary-text-content">{summaryText}</p>
-        </div>
-      ) : (
-        data.pendingSummary && (
-          <div className="summary-section ai-summary-trigger">
-            <button className="generate-ai-btn" onClick={generateAISummary} disabled={loadingAI}>
-              {loadingAI ? "⏳ Analyzing conversation..." : "✨ Generate AI Summary"}
-            </button>
-          </div>
-        )
-      )}
+      <div className="summary-section ai-summary">
+        <h3>✨ AI Summary</h3>
+        <p className="summary-text-content">{summaryText}</p>
+      </div>
 
       {/* Cost Breakdown */}
       {cost && (

@@ -6,6 +6,7 @@ import { createServer } from "http";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createLivekitRouter } from "./livekit/router.js";
+import { AccessToken } from "livekit-server-sdk";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,6 +34,74 @@ app.use(express.json({ limit: "5mb" }));
 app.get("/health", (_, res) => res.send("ok"));
 
 app.use(createLivekitRouter());
+
+// Start Beyond Presence Speech-to-Video avatar in an existing LiveKit room
+app.post("/startAvatar", async (req, res) => {
+    const { roomName } = req.body || {};
+    if (!roomName) {
+        return res.status(400).json({ error: "roomName is required" });
+    }
+
+    const beyApiKey = process.env.BEY_API_KEY || process.env.BEYOND_PRESENCE_API_KEY;
+    const avatarId = process.env.BEY_AVATAR_ID || process.env.BEYOND_PRESENCE_AVATAR_ID;
+    const livekitUrl = process.env.LIVEKIT_URL || process.env.VITE_LIVEKIT_URL;
+    const { LIVEKIT_API_KEY, LIVEKIT_API_SECRET } = process.env;
+
+    if (!beyApiKey || !avatarId || !livekitUrl || !LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) {
+        return res.status(400).json({
+            error: "Missing BEY_API_KEY/BEY_AVATAR_ID/LIVEKIT credentials in environment",
+        });
+    }
+
+    try {
+        const avatarIdentity = `bey-avatar-${Date.now()}`;
+        const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
+            identity: avatarIdentity,
+            name: "Beyond Presence Avatar",
+        });
+        at.addGrant({
+            roomJoin: true,
+            room: roomName,
+            canPublish: true,
+            canSubscribe: true,
+            canPublishData: true,
+            agent: true,
+        });
+        const token = await at.toJwt();
+
+        const response = await fetch("https://api.bey.dev/v1/sessions", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "x-api-key": beyApiKey,
+            },
+            body: JSON.stringify({
+                avatar_id: avatarId,
+                url: livekitUrl,
+                token,
+                transport: "livekit",
+            }),
+        });
+
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            console.error("❌ Beyond Presence start failed:", data);
+            return res.status(response.status).json({
+                error: "Failed to start avatar session",
+                details: data,
+            });
+        }
+
+        return res.json({
+            status: "success",
+            avatar_identity: avatarIdentity,
+            avatar_session: data,
+        });
+    } catch (error) {
+        console.error("❌ startAvatar error:", error);
+        return res.status(500).json({ error: "Avatar startup failed" });
+    }
+});
 
 // Manual AI Summary Generation
 app.post("/generateSummary", async (req, res) => {
