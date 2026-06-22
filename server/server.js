@@ -34,7 +34,12 @@ app.use(express.static(path.join(__dirname, "..", "dist")));
 app.use(express.json({ limit: "5mb" }));
 app.get("/health", (_, res) => res.send("ok"));
 
-app.use(createLivekitRouter());
+// LiveKit router is optional — skip it if its env vars aren't set (test bot doesn't need it)
+try {
+    app.use(createLivekitRouter());
+} catch (e) {
+    console.warn("⚠️ LiveKit router disabled:", e.message);
+}
 
 // Start Beyond Presence Speech-to-Video avatar in an existing LiveKit room
 app.post("/startAvatar", async (req, res) => {
