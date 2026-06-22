@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Voice Agent Test</title>
+<style>
+  body { font-family: sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; }
+  h2 { margin-bottom: 20px; }
+  button { padding: 10px 24px; font-size: 15px; cursor: pointer; margin-right: 10px; border-radius: 6px; border: none; }
+  #startBtn { background: #4f46e5; color: white; }
+  #stopBtn  { background: #dc2626; color: white; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  #status { display: inline-block; margin-left: 10px; font-size: 14px; color: #555; }
+  #log { margin-top: 24px; border: 1px solid #ddd; border-radius: 8px; padding: 16px;
+         height: 400px; overflow-y: auto; font-size: 14px; line-height: 1.8; background: #fafafa; }
+  .user  { color: #1d4ed8; }
+  .agent { color: #15803d; }
+  .event { color: #92400e; }
+  .error { color: #dc2626; }
+  .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
+  .fields label { display: flex; flex-direction: column; font-size: 12px; color: #555; gap: 4px; }
+  .fields input { padding: 8px; border: 1px solid #ccc; border-radius: 5px; font-size: 14px; }
+  .fields .full { grid-column: 1 / -1; }
+</style>
+</head>
+<body>
+
+<h2>GizmoPeak — COD Confirmation Call Test</h2>
+
+<div class="fields">
+  <label>Agent name        <input id="agentName"   value="Rohit" /></label>
+  <label>Customer name     <input id="customerName" value="Amit Sharma" /></label>
+  <label>Order ID          <input id="orderId"      value="GP10482" /></label>
+  <label>Expected delivery <input id="deliveryDate" value="25 June" /></label>
+  <label class="full">Delivery address <input id="deliveryAddress" value="12 MG Road, Koregaon Park, Pune, 411001" /></label>
+</div>
+
+<button id="startBtn" onclick="start()">▶ Start</button>
+<button id="stopBtn"  onclick="stop()" disabled>■ Stop</button>
+<span id="status">Idle</span>
+
+<div id="log"></div>
+
+<script>
+const CARTESIA_KEY   = "sk_car_GhWZYizfJCp6TakhsFujJu";
+const CARTESIA_VOICE = "fd1bb7b2-0edc-4400-8876-9c2e279d035e";
+const WS_URL         = "ws://localhost:8080/agent-proxy";
+const INPUT_RATE     = 16000;   // mic → Deepgram STT
+const OUTPUT_RATE    = 24000;   // Cartesia TTS → speakers
+
+let ws, audioCtx, playbackCtx, micStream, processor, nextPlayTime = 0, scheduledSources = [];
+
+function log(cls, msg) {
+  const el = document.getElementById("log");
+  el.innerHTML += `<div class="${cls}">${msg}</div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function val(id) { return document.getElementById(id).value.trim(); }
+
+function buildGreeting(v) {
+  const part = new Date().getHours() < 17 ? "Good afternoon" : "Good evening";
+  return `${part} sir, main ${v.agent} baat kar raha hoon GizmoPeak se. Aapne ek order place kiya tha, uski confirmation ke liye call kiya hai.`;
+}
+
+function buildPrompt(v) {
+  return `# Role
+Tu ek outbound voice call agent hai (naam: ${v.agent}) jo GizmoPeak ki taraf se call kar raha hai. Kaam: customer ${v.customer} ke COD order (Order ID: ${v.orderId}) ko dispatch se pehle confirm karna.
+
+# Language & Tone
+- Hinglish (natural Hindi-English mix, Roman script). Pure Hindi ya pure English mein switch mat karo.
+- Polite, professional, warm. Hamesha aap/sir/maam — kabhi tu/tum nahi.
+- Yeh live voice call hai. Har turn 1-2 short sentences. Ek baat bolo, phir customer ka response suno.
+- Customer beech mein bole (barge-in) to apni line turant roko aur suno.
+- Amount hamesha ENGLISH mein bolo: "six hundred ninety nine rupees" (₹699 ke liye), Hindi mein nahi. Baaki numbers naturally, digit-by-digit nahi.
+- Ek turn mein sirf ek question. Jawab aane tak wait karo.
+
+# Business Facts (in se bahar koi info mat banao)
+- Company: GizmoPeak (legal: Graphx Techstudio Private Limited)
+- Product: Personal Air Cooler & Humidifier
+- Price: six hundred ninety nine rupees (₹699), sale par (MRP ₹1,499)
+- Payment: COD (Cash on Delivery)
+- Support: support@gizmopeak.in | +91-9810779467
+- Shipping: 24-48 ghante processing, fir 3-5 business days (major cities) / 5-8 days (remote)
+
+# Call-specific info
+- Customer: ${v.customer}
+- Order ID: ${v.orderId}
+- Delivery address: ${v.address}
+- Expected delivery date: ${v.date}
+
+# Call Flow (order mein follow karo, ek step complete hone par hi aage badho)
+NOTE: Jahan script mein ek statement diya hai, sirf wahi bolo. Apni taraf se "kya aapko yaad hai?", "koi dikkat hai?" jaise confirmation sawaal mat jodo, unless step explicitly bolne ko kahe.
+1. Greeting + Identification — (greeting already bola ja chuka hai; ab customer ka response handle karo). Busy ho to better time pucho aur end karo. Wrong number ho to politely end karo.
+2. Product Confirmation: SIRF yeh ek line bolo — "Sir, aapka order ek Personal Air Cooler & Humidifier hai." Iske baad chup raho aur customer ka response suno. Koi follow-up question mat jodo — "kya aapko yeh product yaad hai?" ya "kya aapko yaad hai?" bilkul mat pucho.
+   - Agar customer kahe ki use yaad nahi / "kab order kiya tha?" pooche → reassure karo: "Koi baat nahi sir, aapne kuch din pehle yeh order kiya tha." Phir flow continue karo (agle step par jao). Yeh cancellation ya denial NAHI hai.
+   - SIRF agar customer saaf-saaf kahe "maine yeh order kiya hi nahi" (firm denial) → argue mat karo, "Theek hai sir, hum verify karke aapko call back karenge" bolkar flag karo, end karo.
+3. Amount Confirmation: "Iska total amount six hundred ninety nine rupees hai." Bas yeh statement bolo — "kya aapko is amount se koi dikkat hai?" jaisa koi sawaal mat pucho. Dispute ho to negotiate mat karo, human callback offer karo.
+4. Address Confirmation: "Aapka delivery address hai — ${v.address}. Yeh sahi hai?" NO ho to naya address verbally lo, repeat karke confirm karo, confirm hone tak aage mat badho.
+   - PIN code check: Agar address mein 6-digit PIN code nahi hai, to customer se pucho: "Sir, aapka area PIN code bhi bata dijiye." PIN milne par usko repeat karke confirm karo: "Toh aapka PIN code hai [PIN], sahi hai?" Confirm hone tak aage mat badho.
+5. Delivery Date: "Aapka product ${v.date} tak deliver ho jayega — processing mein 24-48 ghante aur fir 3-5 business days." Expedite/delay request → guarantee mat do, sirf note karo.
+6. Payment Mode: "Payment mode COD rahega — product milne par cash pay karna hoga." Online switch maange → khud change mat karo, "main note kar leta hoon" bolo.
+7. Closing: "Thank you so much for your time. Have a great day!"
+
+# Cancellation (MODE: cancel immediately)
+Customer cancel maange to: "Sir, aap apna order cancel karna chahte hain, sahi samjha?" Confirm hone par: "Theek hai sir, aapka order cancel kar diya gaya hai. Confirmation SMS/email par mil jayega." Reason ek baar pooch sakte ho, par jawab mile ya na mile — cancel kar do.
+
+# Returns/Refund (agar customer pooche)
+Yeh product sale item hai, aur sale items returnable NAHI hote. Generic 7-day return promise mat do. Bolo: "Sir, yeh product sale par hai aur sale items policy ke according returnable nahi hote. Damaged ya wrong product aaye to turant support@gizmopeak.in ya +91-9810779467 par contact kariye."
+
+# Guardrails
+- Customer se kabhi argue mat karo. Upset/rude ho to calm raho, de-escalate karo.
+- Yeh confirmation call hai, sales call nahi — upsell mat karo.
+- Lamba silence ho to ek baar "Sir, aap sun rahe hain?" pucho, fir bhi no response to politely end karo.
+- Resolve na ho (complaint/confusion/abuse) → "Hamara agent call back karega" bolkar end karo.
+- Jo nahi pata, "main note kar leta hoon, agent batayega" bolo — info invent mat karo.`;
+}
+
+async function start() {
+  document.getElementById("startBtn").disabled = true;
+  document.getElementById("stopBtn").disabled  = false;
+  document.getElementById("status").textContent = "Connecting…";
+
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  } catch(e) {
+    log("error", "❌ Mic access denied"); resetUI(); return;
+  }
+
+  audioCtx    = new AudioContext({ sampleRate: INPUT_RATE });
+  playbackCtx = new AudioContext({ sampleRate: OUTPUT_RATE });
+  nextPlayTime = 0;
+
+  ws = new WebSocket(WS_URL);
+  ws.binaryType = "arraybuffer";
+
+  const v = {
+    agent:    val("agentName"),
+    customer: val("customerName"),
+    orderId:  val("orderId"),
+    address:  val("deliveryAddress"),
+    date:     val("deliveryDate"),
+  };
+
+  ws.onopen = () => {
+    document.getElementById("status").textContent = "Connected";
+    log("event", "✅ Connected — sending settings…");
+
+    ws.send(JSON.stringify({
+      type: "Settings",
+      audio: {
+        input:  { encoding: "linear16", sample_rate: INPUT_RATE },
+        output: { encoding: "linear16", sample_rate: OUTPUT_RATE, container: "none" },
+      },
+      agent: {
+        listen: { provider: { type: "deepgram", model: "nova-3", language: "hi" } },
+        think:  { provider: { type: "anthropic", model: "claude-sonnet-4-6" },
+                  prompt: buildPrompt(v) },
+        speak:  {
+          provider: { type: "cartesia", model_id: "sonic-3", voice: { mode: "id", id: CARTESIA_VOICE } },
+          endpoint: { url: "https://api.cartesia.ai/tts/bytes", headers: { "x-api-key": CARTESIA_KEY } },
+        },
+        greeting: buildGreeting(v),
+      },
+    }));
+
+    startMic();
+  };
+
+  ws.onmessage = (e) => {
+    if (e.data instanceof ArrayBuffer) { playAudio(e.data); return; }
+    const msg = JSON.parse(e.data);
+    if (msg.type === "ConversationText") {
+      msg.role === "user"
+        ? log("user",  "🧑 You: "   + msg.content)
+        : log("agent", "🤖 Agent: " + msg.content);
+    } else if (msg.type === "SettingsApplied") {
+      log("event", "⚙️ Settings applied — speak now!");
+    } else if (msg.type === "UserStartedSpeaking") {
+      log("event", "🎙 You interrupted — stopping agent…");
+      clearPlayback();   // barge-in: instantly cut off buffered agent audio
+    } else if (msg.type === "AgentStartedSpeaking") {
+      log("event", "🔊 Agent speaking…");
+    } else if (msg.type === "Error" || msg.type === "Warning") {
+      log("error", "⚠️ " + JSON.stringify(msg));
+    }
+  };
+
+  ws.onerror = () => log("error", "❌ Connection error.");
+  ws.onclose = (e) => {
+    log("event", `Disconnected (${e.code})`);
+    document.getElementById("status").textContent = "Disconnected";
+    resetUI();
+  };
+}
+
+function startMic() {
+  const source = audioCtx.createMediaStreamSource(micStream);
+  processor    = audioCtx.createScriptProcessor(4096, 1, 1);
+  processor.onaudioprocess = (e) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const f32  = e.inputBuffer.getChannelData(0);
+    const i16  = new Int16Array(f32.length);
+    for (let i = 0; i < f32.length; i++) i16[i] = Math.max(-32768, Math.min(32767, f32[i] * 32768));
+    ws.send(i16.buffer);
+  };
+  source.connect(processor);
+  processor.connect(audioCtx.destination);
+}
+
+function playAudio(buf) {
+  // Schedule each chunk contiguously on a running time cursor → no gaps/stutter
+  const i16 = new Int16Array(buf);
+  const f32 = new Float32Array(i16.length);
+  for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+  const audioBuf = playbackCtx.createBuffer(1, f32.length, OUTPUT_RATE);
+  audioBuf.getChannelData(0).set(f32);
+  const src = playbackCtx.createBufferSource();
+  src.buffer = audioBuf;
+  src.connect(playbackCtx.destination);
+  const now = playbackCtx.currentTime;
+  if (nextPlayTime < now) nextPlayTime = now;
+  src.start(nextPlayTime);
+  nextPlayTime += audioBuf.duration;
+  scheduledSources.push(src);
+  src.onended = () => { scheduledSources = scheduledSources.filter(s => s !== src); };
+}
+
+function clearPlayback() {
+  // Stop every scheduled chunk immediately so the agent goes silent on barge-in
+  scheduledSources.forEach(s => { try { s.stop(); } catch(_) {} });
+  scheduledSources = [];
+  nextPlayTime = 0;
+}
+
+function stop() {
+  if (ws) ws.close();
+  if (processor) { processor.disconnect(); processor = null; }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (audioCtx)    { audioCtx.close(); audioCtx = null; }
+  if (playbackCtx) { playbackCtx.close(); playbackCtx = null; }
+  resetUI();
+}
+
+function resetUI() {
+  document.getElementById("startBtn").disabled = false;
+  document.getElementById("stopBtn").disabled  = true;
+}
+</script>
+</body>
+</html>

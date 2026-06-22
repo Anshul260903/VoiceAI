@@ -7,6 +7,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { createLivekitRouter } from "./livekit/router.js";
 import { AccessToken } from "livekit-server-sdk";
+import { WebSocketServer, WebSocket } from "ws";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -149,6 +150,28 @@ Keep it professional and concise (max 150 words).`;
         console.error("❌ Summary generation error:", error);
         res.status(500).json({ error: "Failed to generate summary" });
     }
+});
+
+// Deepgram Voice Agent WebSocket proxy
+const wss = new WebSocketServer({ server, path: "/agent-proxy" });
+wss.on("connection", (browserWs) => {
+    const dgWs = new WebSocket("wss://agent.deepgram.com/v1/agent/converse", {
+        headers: { Authorization: `Token ${process.env.DEEPGRAM_API_KEY}` },
+    });
+    const queue = [];  // buffer browser messages until Deepgram connection is open
+    dgWs.on("open", () => {
+        console.log("🔗 Deepgram agent connected");
+        queue.forEach(([data, isBinary]) => dgWs.send(data, { binary: isBinary }));
+        queue.length = 0;
+    });
+    dgWs.on("message", (data, isBinary) => { if (browserWs.readyState === 1) browserWs.send(data, { binary: isBinary }); });
+    dgWs.on("close",   ()    => browserWs.close());
+    dgWs.on("error",   (e)   => console.error("DG WS error:", e.message));
+    browserWs.on("message", (data, isBinary) => {
+        if (dgWs.readyState === 1) dgWs.send(data, { binary: isBinary });
+        else queue.push([data, isBinary]);
+    });
+    browserWs.on("close", () => dgWs.close());
 });
 
 const PORT = Number(process.env.PORT || 8080);
